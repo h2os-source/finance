@@ -367,8 +367,8 @@ h1, h2, p { margin-top: 0; }
 .account-edit-card { border: 1px solid #e9edf3; border-radius: 10px; display: grid; gap: 15px 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; padding: 22px 16px 16px; position: relative; }
 .account-edit-card legend { color: #43516a; font-size: 12px; font-weight: 700; padding: 0 6px; }
 .account-edit-card > label { color: #596579; display: grid; font-size: 11px; font-weight: 600; gap: 7px; min-width: 0; }
-.account-edit-card input, .account-edit-card select { background: #fff; border: 1px solid #e7eaf0; border-radius: 7px; color: #344156; font-size: 13px; min-width: 0; outline: none; padding: 11px 12px; width: 100%; }
-.account-edit-card input:focus, .account-edit-card select:focus { border-color: #8ba0e9; box-shadow: 0 0 0 3px #617fe31a; }
+.account-edit-card input, .account-edit-card select, .account-edit-card textarea { background: #fff; border: 1px solid #e7eaf0; border-radius: 7px; color: #344156; font-family: inherit; font-size: 13px; min-width: 0; outline: none; padding: 11px 12px; width: 100%; }
+.account-edit-card input:focus, .account-edit-card select:focus, .account-edit-card textarea:focus { border-color: #8ba0e9; box-shadow: 0 0 0 3px #617fe31a; }
 .account-edit-card .money-input > input { padding-left: 27px; }
 .account-edit-card .remove-split-button { background: transparent; border: 0; color: #b66f65; font-size: 10px; padding: 4px; position: absolute; right: 12px; top: 8px; }
 .coming-page { align-items: flex-start; display: flex; flex-direction: column; margin: 13vh auto 0; max-width: 460px; padding: 30px; }

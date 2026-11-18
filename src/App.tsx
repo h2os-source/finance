@@ -1004,7 +1004,6 @@ function AccountsPage({
             <div><h2>{accountType === "super" ? "Your super funds" : "Your accounts"}</h2><p>{accountType === "super" ? "Add one entry for each super fund account." : "Add an account for each bank, offset account, or super fund."}</p></div>
             <button className="secondary-button add-split-button" disabled={loading} onClick={() => setDrafts((current) => [...current, newAccountDraft(accountType ?? "cash")])} type="button">{accountType === "super" ? "+ Add super account" : "+ Add account"}</button>
           </div>
-          {drafts.length === 0 && <p className="mortgage-status">No personal accounts added. Use “Add account” to add one.</p>}
           {drafts.map((account, index) => (
             <fieldset className="account-edit-card" key={index}>
               <legend>{accountType === "super" ? `Super account ${index + 1}` : `Account ${index + 1}`}</legend>
@@ -1060,10 +1059,12 @@ function AccountsPage({
           ))}
           {error && <div className="form-error" role="alert">{error}</div>}
           {message && <div className="mortgage-success" role="status">{message}</div>}
-          <div className="mortgage-actions">
-            <button className="primary-button" disabled={loading || saving} type="submit">{saving ? "Saving…" : accountType === "super" ? "Save super accounts" : "Save accounts"} <ArrowRight size={15} /></button>
-            {accounts.some((account) => !account.isMock) && <span>Saving replaces your current manually entered account list.</span>}
-          </div>
+          {drafts.length > 0 && (
+            <div className="mortgage-actions">
+              <button className="primary-button" disabled={loading || saving} type="submit">{saving ? "Saving…" : accountType === "super" ? "Save super accounts" : "Save accounts"} <ArrowRight size={15} /></button>
+              {accounts.some((account) => !account.isMock) && <span>Saving replaces your current manually entered account list.</span>}
+            </div>
+          )}
         </form>
       </section>
     </div>
