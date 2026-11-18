@@ -9,6 +9,7 @@ import { getDashboardData } from "./dashboard";
 import {
   createPlannerItem,
   deletePlannerItem,
+  deletePlannerItemsByStatus,
   getFinanceReport,
   getPlannerUpcoming,
   importStatementBatch,
@@ -162,6 +163,45 @@ test("deleting paid recurring history leaves the next upcoming occurrence intact
   const upcoming = listPlannerItems(db, "bill").find((item) => item.id === recurring.id);
   assert.equal(upcoming?.status, "upcoming");
   assert.equal(upcoming?.dueDate, "2026-11-10");
+  db.close();
+});
+
+test("bulk deleting Upcoming bills leaves all Paid history intact", () => {
+  const db = createDatabase(":memory:", { seedSampleData: false });
+  const recurring = createBill(db, "monthly");
+  markPlannerItemPaid(db, recurring.id, "2026-10-10");
+  importStatementBills(db, [{
+    name: "Water",
+    provider: "Water Co",
+    amountCents: 5000,
+    transactionDate: "2026-10-11",
+    notes: "Statement payment",
+  }]);
+
+  assert.equal(deletePlannerItemsByStatus(db, "upcoming"), 1);
+  const remaining = listPlannerItems(db, "bill");
+  assert.equal(remaining.some((item) => item.status === "upcoming"), false);
+  assert.equal(remaining.filter((item) => item.status === "paid").length, 2);
+  db.close();
+});
+
+test("bulk deleting Paid bills leaves Upcoming bills intact", () => {
+  const db = createDatabase(":memory:", { seedSampleData: false });
+  const upcoming = createBill(db, "monthly");
+  markPlannerItemPaid(db, upcoming.id, "2026-10-10");
+  importStatementBills(db, [{
+    name: "Water",
+    provider: "Water Co",
+    amountCents: 5000,
+    transactionDate: "2026-10-11",
+    notes: "Statement payment",
+  }]);
+  const separateUpcoming = createBill(db);
+
+  assert.equal(deletePlannerItemsByStatus(db, "paid"), 2);
+  const remaining = listPlannerItems(db, "bill");
+  assert.deepEqual(remaining.map((item) => item.id).sort((left, right) => left - right), [upcoming.id, separateUpcoming.id].sort((left, right) => left - right));
+  assert.equal(remaining.every((item) => item.status === "upcoming"), true);
   db.close();
 });
 

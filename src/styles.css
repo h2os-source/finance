@@ -101,9 +101,15 @@ button { cursor: pointer; }
 .entry-description-field { grid-column: 1 / -1; }
 .finance-form-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 9px; grid-column: 1 / -1; }
 .finance-list-panel .panel-heading { margin-bottom: 14px; }
+.spending-delete-all-button { font-size: 10px; padding: 6px 10px; }
+.spending-delete-all-button:disabled { cursor: not-allowed; opacity: .5; }
 .finance-entry-list { display: grid; }
 .finance-entry-row { align-items: center; border-top: 1px solid #eff1f4; display: flex; flex-wrap: wrap; gap: 10px 14px; min-width: 0; padding: 12px 2px; }
 .bill-status-tabs { background: #f8f9fb; border: 1px solid #e7eaf0; border-radius: 8px; display: inline-flex; gap: 3px; margin: -4px 0 12px; padding: 3px; }
+.bill-status-controls { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; margin: -4px 0 12px; }
+.bill-status-controls .bill-status-tabs { margin: 0; }
+.bill-delete-all-button { font-size: 10px; padding: 6px 10px; }
+.bill-delete-all-button:disabled { cursor: not-allowed; opacity: .5; }
 .bill-status-tabs button { background: transparent; border: 0; border-radius: 6px; color: #657188; cursor: pointer; font-family: inherit; font-size: 11px; font-weight: 600; padding: 7px 12px; }
 .bill-status-tabs button.selected { background: #617fe3; color: #fff; }
 .bill-status-tabs button:focus-visible { box-shadow: 0 0 0 2px #8ba0e9; outline: none; }

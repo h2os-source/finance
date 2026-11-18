@@ -282,6 +282,10 @@ export function deleteEntry(db: Database.Database, id: number): boolean {
   return db.prepare("DELETE FROM finance_entry WHERE id = ?").run(id).changes > 0;
 }
 
+export function deleteAllSpendingEntries(db: Database.Database): number {
+  return db.prepare("DELETE FROM finance_entry WHERE kind = 'spending'").run().changes;
+}
+
 export function importEntries(db: Database.Database, inputs: FinanceEntryInput[]): number {
   if (inputs.length === 0) throw new Error("Choose at least one transaction to import.");
   if (inputs.length > 2000) throw new Error("Import up to 2,000 transactions at a time.");
@@ -481,6 +485,10 @@ export function updatePlannerItem(db: Database.Database, id: number, input: Plan
 
 export function deletePlannerItem(db: Database.Database, id: number): boolean {
   return db.prepare("DELETE FROM planner_item WHERE id = ?").run(id).changes > 0;
+}
+
+export function deletePlannerItemsByStatus(db: Database.Database, status: PlannerStatus): number {
+  return db.prepare("DELETE FROM planner_item WHERE kind = 'bill' AND status = ?").run(status).changes;
 }
 
 export function importStatementBills(db: Database.Database, inputs: StatementBillInput[]): PlannerItem[] {

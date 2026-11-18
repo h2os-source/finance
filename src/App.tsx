@@ -1286,6 +1286,7 @@ function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChang
   const [editingRecurringId, setEditingRecurringId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deletingAllSpending, setDeletingAllSpending] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const pageTitle = kind === "income" ? "Income" : "Spending";
@@ -1369,6 +1370,25 @@ function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChang
     }
   }
 
+  async function removeAllSpendingEntries() {
+    if (kind !== "spending" || entries.length === 0) return;
+    if (!window.confirm(`Delete all ${entries.length} spending entries? This cannot be undone.`)) return;
+    setError("");
+    setMessage("");
+    setDeletingAllSpending(true);
+    try {
+      const { deleted } = await api.deleteAllSpendingEntries();
+      await loadEntries();
+      await onChanged();
+      if (editingId !== null) resetEntryForm();
+      setMessage(`${deleted} spending ${deleted === 1 ? "entry" : "entries"} deleted.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to delete Spending entries.");
+    } finally {
+      setDeletingAllSpending(false);
+    }
+  }
+
   async function removeRecurringIncome(item: RecurringIncome) {
     if (!window.confirm(`Delete recurring ${item.category} income of ${formatMoney(item.amountCents)}?`)) return;
     setError("");
@@ -1445,7 +1465,14 @@ function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChang
       </section>
       {kind === "spending" && <StatementImport onImported={async () => { await loadEntries(); await onChanged(); }} />}
       <section className="panel finance-list-panel">
-        <div className="panel-heading"><div><h2>Entries</h2><p>Most recent first.</p></div></div>
+        <div className="panel-heading">
+          <div><h2>Entries</h2><p>Most recent first.</p></div>
+          {kind === "spending" && (
+            <button className="account-delete-button spending-delete-all-button" disabled={loading || deletingAllSpending || entries.length === 0} onClick={() => void removeAllSpendingEntries()} type="button">
+              {deletingAllSpending ? "Deleting…" : "Delete all"}
+            </button>
+          )}
+        </div>
         {loading ? <p className="mortgage-status">Loading entries…</p> : entries.length === 0 ? (
           <p className="dashboard-section-empty">No {kind} entries yet. Add one above to populate charts and reports.</p>
         ) : (
@@ -1509,6 +1536,7 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [billTab, setBillTab] = useState<"upcoming" | "paid">("upcoming");
   const [markingPaidId, setMarkingPaidId] = useState<number | null>(null);
+  const [deletingAllBills, setDeletingAllBills] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -1585,6 +1613,28 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
     }
   }
 
+  async function deleteAllBillsInTab() {
+    if (kind !== "bill" || items.length === 0) return;
+    const singularLabel = billTab === "paid" ? "paid bill" : "upcoming bill";
+    const pluralLabel = `${singularLabel}s`;
+    const selectedLabel = items.length === 1 ? singularLabel : pluralLabel;
+    if (!window.confirm(`Delete all ${items.length} ${selectedLabel}? This cannot be undone.`)) return;
+    setError("");
+    setMessage("");
+    setDeletingAllBills(true);
+    try {
+      const { deleted } = await api.deletePlannerItemsByStatus(billTab);
+      await loadItems();
+      await onChanged();
+      if (editingId !== null && items.some((item) => item.id === editingId)) resetForm();
+      setMessage(`${deleted} ${deleted === 1 ? singularLabel : pluralLabel} deleted.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : `Unable to delete ${pluralLabel}.`);
+    } finally {
+      setDeletingAllBills(false);
+    }
+  }
+
   function editItem(item: PlannerItem) {
     setEditingId(item.id);
     setDraft({
@@ -1641,9 +1691,14 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
       <section className="panel finance-list-panel">
         <div className="panel-heading"><div><h2>{kind === "bill" ? "Bills" : "Policies and renewals"}</h2><p>{kind === "bill" ? "Track upcoming bills and payments already made." : "Recurring due dates roll forward automatically."}</p></div></div>
         {kind === "bill" && (
+        <div className="bill-status-controls">
           <div aria-label="Bill status" className="bill-status-tabs" role="tablist">
             <button aria-selected={billTab === "upcoming"} className={billTab === "upcoming" ? "selected" : ""} onClick={() => setBillTab("upcoming")} role="tab" type="button">Upcoming</button>
             <button aria-selected={billTab === "paid"} className={billTab === "paid" ? "selected" : ""} onClick={() => setBillTab("paid")} role="tab" type="button">Paid</button>
+          </div>
+          <button className="account-delete-button bill-delete-all-button" disabled={loading || deletingAllBills || items.length === 0} onClick={() => void deleteAllBillsInTab()} type="button">
+            {deletingAllBills ? "Deleting…" : "Delete all"}
+          </button>
           </div>
         )}
         {loading ? <p className="mortgage-status">Loading {title.toLowerCase()}…</p> : items.length === 0 ? <p className="dashboard-section-empty">No {title.toLowerCase()} added yet.</p> : (

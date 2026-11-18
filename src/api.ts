@@ -12,6 +12,7 @@ import type {
   PlannerItemInput,
   EntryKind,
   PlannerKind,
+  PlannerStatus,
   RecurringIncome,
   RecurringIncomeInput,
   StatementTransaction,
@@ -81,6 +82,8 @@ export const api = {
   saveLoans: (loans: Array<Omit<Loan, "id" | "updatedAt">>) =>
     request<Loan[]>("/api/loans", { method: "PUT", body: JSON.stringify({ loans }) }),
   entries: (kind: EntryKind) => request<FinanceEntry[]>(`/api/entries?kind=${kind}`),
+  deleteAllSpendingEntries: () =>
+    request<{ deleted: number }>("/api/entries", { method: "DELETE" }),
   createEntry: (entry: FinanceEntryInput) =>
     request<FinanceEntry>("/api/entries", { method: "POST", body: JSON.stringify(entry) }),
   updateEntry: (id: number, entry: FinanceEntryInput) =>
@@ -119,5 +122,10 @@ export const api = {
   markPlannerItemPaid: (id: number) =>
     request<PlannerItem>(`/api/planner/${id}/paid`, { method: "POST" }),
   deletePlannerItem: (id: number) => request<void>(`/api/planner/${id}`, { method: "DELETE" }),
+  deletePlannerItemsByStatus: (status: PlannerStatus) =>
+    request<{ deleted: number }>("/api/planner/bulk-delete", {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    }),
   report: () => request<FinanceReport>("/api/reports"),
 };

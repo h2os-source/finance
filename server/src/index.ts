@@ -14,8 +14,10 @@ import {
   createPlannerItem,
   createRecurringIncome,
   deleteRecurringIncome,
+  deleteAllSpendingEntries,
   deleteEntry,
   deletePlannerItem,
+  deletePlannerItemsByStatus,
   getFinanceReport,
   importStatementBatch,
   listBudgets,
@@ -356,6 +358,10 @@ app.put("/api/entries/:id", requireAuth, (req, res, next) => {
   }
 });
 
+app.delete("/api/entries", requireAuth, (_req, res) => {
+  res.json({ deleted: deleteAllSpendingEntries(db) });
+});
+
 app.delete("/api/entries/:id", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isSafeInteger(id) || id <= 0) {
@@ -454,6 +460,15 @@ app.post("/api/planner/:id/paid", requireAuth, (req, res, next) => {
     }
     next(error);
   }
+});
+
+app.post("/api/planner/bulk-delete", requireAuth, (req, res) => {
+  const status = (req.body as { status?: unknown } | null)?.status;
+  if (status !== "upcoming" && status !== "paid") {
+    res.status(400).json({ error: "Choose an Upcoming or Paid bill status." });
+    return;
+  }
+  res.json({ deleted: deletePlannerItemsByStatus(db, status) });
 });
 
 app.delete("/api/planner/:id", requireAuth, (req, res) => {
