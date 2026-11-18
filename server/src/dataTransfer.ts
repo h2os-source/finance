@@ -11,7 +11,7 @@ const backupTables = {
   finance_entry: ["id", "kind", "amount_cents", "category", "description", "entry_date"],
   recurring_income: ["id", "amount_cents", "category", "description", "next_date", "recurrence"],
   budget_plan: ["id", "category", "limit_cents", "frequency", "source_type", "source_id"],
-  planner_item: ["id", "kind", "name", "provider", "amount_cents", "due_date", "recurrence", "notes", "property_name", "insured_value_cents", "policy_type"],
+  planner_item: ["id", "kind", "status", "paid_date", "name", "provider", "amount_cents", "due_date", "recurrence", "notes", "property_name", "insured_value_cents", "policy_type"],
   app_setting: ["key", "value"],
 } as const;
 
@@ -22,7 +22,7 @@ type BackupTables = Record<TableName, BackupRow[]>;
 
 export interface FinanceBackup {
   format: "finance-dashboard-backup";
-  version: 2;
+  version: 3;
   exportedAt: string;
   tables: BackupTables;
 }
@@ -52,14 +52,14 @@ export function exportBackup(db: Database.Database): FinanceBackup {
 
   return {
     format: "finance-dashboard-backup",
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     tables,
   };
 }
 
 export function restoreBackup(db: Database.Database, value: unknown): void {
-  if (!isRecord(value) || value.format !== "finance-dashboard-backup" || (value.version !== 1 && value.version !== 2) || !isRecord(value.tables)) {
+  if (!isRecord(value) || value.format !== "finance-dashboard-backup" || ![1, 2, 3].includes(value.version as number) || !isRecord(value.tables)) {
     throw new Error("This file is not a supported Finance Dashboard backup.");
   }
 
@@ -78,7 +78,7 @@ export function restoreBackup(db: Database.Database, value: unknown): void {
     }
     if (table === "planner_item" && Array.isArray(rows)) {
       tables[table] = rows.map((row) =>
-        isRecord(row) ? { property_name: "Home", insured_value_cents: 0, policy_type: "home", ...row } : row,
+        isRecord(row) ? { property_name: "Home", insured_value_cents: 0, policy_type: "home", status: "upcoming", paid_date: null, ...row } : row,
       );
     }
     if (table === "budget_plan" && Array.isArray(rows)) {

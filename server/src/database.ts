@@ -126,6 +126,8 @@ export function createDatabase(
     CREATE TABLE IF NOT EXISTS planner_item (
       id INTEGER PRIMARY KEY,
       kind TEXT NOT NULL CHECK (kind IN ('bill', 'insurance')),
+      status TEXT NOT NULL DEFAULT 'upcoming' CHECK (status IN ('upcoming', 'paid')),
+      paid_date TEXT,
       name TEXT NOT NULL,
       provider TEXT NOT NULL DEFAULT '',
       amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
@@ -236,6 +238,14 @@ function ensurePlannerColumns(db: Database.Database): void {
   }
   if (!columns.has("policy_type")) {
     db.exec("ALTER TABLE planner_item ADD COLUMN policy_type TEXT NOT NULL DEFAULT 'home'");
+  }
+  if (!columns.has("status")) {
+    db.exec("ALTER TABLE planner_item ADD COLUMN status TEXT NOT NULL DEFAULT 'upcoming' CHECK (status IN ('upcoming', 'paid'))");
+  } else {
+    db.exec("UPDATE planner_item SET status = 'upcoming' WHERE status IS NULL OR status NOT IN ('upcoming', 'paid')");
+  }
+  if (!columns.has("paid_date")) {
+    db.exec("ALTER TABLE planner_item ADD COLUMN paid_date TEXT");
   }
 }
 

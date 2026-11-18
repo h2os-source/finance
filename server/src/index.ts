@@ -17,11 +17,12 @@ import {
   deleteEntry,
   deletePlannerItem,
   getFinanceReport,
-  importEntries,
+  importStatementBatch,
   listBudgets,
   listEntries,
   listPlannerItems,
   listRecurringIncome,
+  markPlannerItemPaid,
   saveBudgets,
   updateEntry,
   updatePlannerItem,
@@ -33,6 +34,8 @@ import {
   type PlannerKind,
   type RecurringIncomeInput,
   type Recurrence,
+  type StatementBillInput,
+  type StatementImportFailure,
 } from "./finance";
 
 const currentDirectory = __dirname;
@@ -259,43 +262,69 @@ app.post("/api/entries/import", requireAuth, (req, res, next) => {
       entries?: unknown;
       bills?: unknown;
     };
-    let imported = 0;
-    if (Array.isArray(body.entries) && body.entries.length > 0) {
-      imported = importEntries(db, body.entries.map((entry) => {
+    const entries: FinanceEntryInput[] = [];
+    const parseFailures: StatementImportFailure[] = [];
+    if (Array.isArray(body.entries)) {
+      body.entries.forEach((entry, index) => {
         const kind = (entry as { kind?: unknown } | null)?.kind === "income" ? "income" : "spending";
-        return parseEntry({ ...(entry as object), kind });
-      }));
+        try {
+          entries.push(parseEntry({ ...(entry as object), kind }));
+        } catch (error) {
+          parseFailures.push({
+            destination: kind,
+            index,
+            message: error instanceof Error ? error.message : "This transaction could not be imported.",
+          });
+        }
+      });
     }
-    let importedBills = 0;
-    if (Array.isArray(body.bills) && body.bills.length > 0) {
-      for (const bill of body.bills) {
-        if (!bill || typeof (bill as { name?: unknown }).name !== "string") continue;
-        const b = bill as {
-          name: string;
-          provider?: string;
-          amountCents: number;
-          dueDate: string;
-          recurrence?: Recurrence;
-          notes?: string;
-        };
-        createPlannerItem(db, {
-          kind: "bill",
-          name: b.name.trim().slice(0, 100),
-          provider: (b.provider ?? "Bill").trim().slice(0, 100),
-          amountCents: Math.round(Number(b.amountCents)),
-          dueDate: b.dueDate,
-          recurrence: (b.recurrence && ["none", "weekly", "fortnightly", "monthly", "quarterly", "yearly"].includes(b.recurrence))
-            ? b.recurrence
-            : "monthly",
-          notes: (b.notes ?? "").slice(0, 300),
-        });
-        importedBills++;
-      }
+
+    const bills: StatementBillInput[] = [];
+    if (Array.isArray(body.bills)) {
+      body.bills.forEach((bill, index) => {
+        try {
+          if (!bill || typeof (bill as { name?: unknown }).name !== "string") {
+            throw new Error("Enter a valid bill name.");
+          }
+          const b = bill as {
+            name: string;
+            provider?: unknown;
+            amountCents: number;
+            transactionDate?: unknown;
+            dueDate?: unknown;
+            notes?: unknown;
+          };
+          const transactionDate = b.transactionDate ?? b.dueDate;
+          if (typeof transactionDate !== "string") throw new Error("Enter a valid bank transaction date.");
+          if (b.provider !== undefined && typeof b.provider !== "string") throw new Error("Enter a valid bill provider.");
+          if (b.notes !== undefined && typeof b.notes !== "string") throw new Error("Enter valid bill notes.");
+          bills.push({
+            name: b.name.trim().slice(0, 100),
+            provider: (b.provider ?? "Bill").trim().slice(0, 100),
+            amountCents: Math.round(Number(b.amountCents)),
+            transactionDate,
+            notes: ((b.notes ?? "") as string).slice(0, 300),
+          });
+        } catch (error) {
+          parseFailures.push({
+            destination: "bill",
+            index,
+            message: error instanceof Error ? error.message : "This bill transaction could not be imported.",
+          });
+        }
+      });
     }
-    if (imported === 0 && importedBills === 0) {
-      throw new Error("Choose transactions to import.");
+
+    const result = importStatementBatch(db, entries, bills);
+    result.failures.unshift(...parseFailures);
+    if (result.imported === 0 && result.importedBills === 0) {
+      const error = result.failures.length
+        ? `No transactions were imported. ${result.failures.map((failure) => failure.message).join(" ")}`
+        : "Choose transactions to import.";
+      res.status(400).json({ error, failures: result.failures });
+      return;
     }
-    res.status(201).json({ imported, importedBills });
+    res.status(201).json(result);
   } catch (error) {
     if (error instanceof Error) {
       res.status(400).json({ error: error.message });
@@ -393,6 +422,28 @@ app.put("/api/planner/:id", requireAuth, (req, res, next) => {
     const item = updatePlannerItem(db, id, parsePlannerItem(req.body));
     if (!item) {
       res.status(404).json({ error: "That item was not found." });
+      return;
+    }
+    res.json(item);
+  } catch (error) {
+    if (error instanceof Error) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.post("/api/planner/:id/paid", requireAuth, (req, res, next) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    res.status(400).json({ error: "Choose a valid bill." });
+    return;
+  }
+  try {
+    const item = markPlannerItemPaid(db, id);
+    if (!item) {
+      res.status(404).json({ error: "That upcoming bill was not found." });
       return;
     }
     res.json(item);

@@ -103,6 +103,12 @@ button { cursor: pointer; }
 .finance-list-panel .panel-heading { margin-bottom: 14px; }
 .finance-entry-list { display: grid; }
 .finance-entry-row { align-items: center; border-top: 1px solid #eff1f4; display: flex; flex-wrap: wrap; gap: 10px 14px; min-width: 0; padding: 12px 2px; }
+.bill-status-tabs { background: #f8f9fb; border: 1px solid #e7eaf0; border-radius: 8px; display: inline-flex; gap: 3px; margin: -4px 0 12px; padding: 3px; }
+.bill-status-tabs button { background: transparent; border: 0; border-radius: 6px; color: #657188; cursor: pointer; font-family: inherit; font-size: 11px; font-weight: 600; padding: 7px 12px; }
+.bill-status-tabs button.selected { background: #617fe3; color: #fff; }
+.bill-status-tabs button:focus-visible { box-shadow: 0 0 0 2px #8ba0e9; outline: none; }
+.bill-mark-paid-button { color: #526fc9; padding: 6px 9px; white-space: nowrap; }
+.bill-paid-status { background: #edf2ff; border-radius: 6px; color: #526fc9; font-size: 10px; font-weight: 600; padding: 5px 8px; }
 .finance-entry-date { color: #8791a0; flex: 0 0 95px; font-size: 10px; }
 .finance-entry-details { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 100px; }
 .finance-entry-details strong { color: #48566c; font-size: 11px; }
@@ -318,9 +324,10 @@ h1, h2, p { margin-top: 0; }
 .mortgage-split > label { min-width: 0; }
 .mortgage-split .remove-split-button { background: transparent; border: 0; color: #b66f65; font-size: 10px; padding: 4px; position: absolute; right: 12px; top: 8px; }
 .mortgage-split .remove-split-button:disabled { color: #b9c0ca; cursor: not-allowed; }
-.mortgage-split .fixed-rate-option { align-items: center; align-self: end; display: flex; gap: 8px; min-height: 39px; }
-.mortgage-split .fixed-rate-option input { accent-color: #617fe3; height: 16px; margin: 0; width: 16px; }
-.fixed-rate-option span { color: #8791a0; font-size: 10px; font-weight: 400; }
+.mortgage-split .rate-type-control { align-self: end; background: #f8f9fb; border: 1px solid #e7eaf0; border-radius: 7px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 39px; overflow: hidden; padding: 3px; }
+.rate-type-control button { background: transparent; border: 0; border-radius: 5px; color: #657188; cursor: pointer; font-family: inherit; font-size: 11px; font-weight: 600; padding: 6px 12px; }
+.rate-type-control button[aria-pressed="true"] { background: #617fe3; color: #fff; }
+.rate-type-control button:focus-visible { box-shadow: inset 0 0 0 2px #8ba0e9; outline: none; }
 .add-split-button { justify-self: start; padding: 9px 12px; }
 .mortgage-total { align-items: center; border-top: 1px solid #edf0f4; color: #788497; display: flex; font-size: 11px; justify-content: space-between; padding-top: 15px; }
 .mortgage-total strong { color: #35445d; font-size: 15px; }
@@ -332,6 +339,7 @@ h1, h2, p { margin-top: 0; }
 .loan-card legend { color: #43516a; font-size: 12px; font-weight: 700; padding: 0 6px; }
 .loan-card > label { color: #596579; display: grid; font-size: 11px; font-weight: 600; gap: 7px; min-width: 0; }
 .loan-card input, .loan-card select { background: #fff; border: 1px solid #e7eaf0; border-radius: 7px; color: #344156; font-size: 13px; min-width: 0; outline: none; padding: 11px 12px; width: 100%; }
+.loan-card .money-input input { padding-left: 27px; }
 .loan-card input:focus, .loan-card select:focus { border-color: #8ba0e9; box-shadow: 0 0 0 3px #617fe31a; }
 .loan-card .remove-split-button { background: transparent; border: 0; color: #b66f65; font-size: 10px; padding: 4px; position: absolute; right: 12px; top: 8px; }
 .loans-empty { align-items: center; display: flex; flex-wrap: wrap; gap: 15px; padding: 8px 0; }
@@ -432,6 +440,8 @@ h1, h2, p { margin-top: 0; }
 }
 
 .statement-import .panel-heading { align-items: center; }
+.statement-bulk-actions { display: flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; margin-top: 10px; }
+.statement-bulk-actions .secondary-button { font-size: 10px; padding: 6px 10px; }
 .statement-table-wrap { max-height: 420px; overflow: auto; margin: 12px 0; }
 .statement-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .statement-table th, .statement-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid rgba(128, 128, 128, 0.25); }

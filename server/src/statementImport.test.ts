@@ -26,6 +26,73 @@ test("statement parser reads balance-based rows and infers direction", () => {
   assert.equal(rows[2].category, "Fuel");
 });
 
+test("statement parser reconstructs multiline Westpac rows and ignores report furniture", () => {
+  const text = [
+    "Westpac Choice Transactions",
+    "01/09/2026 Opening balance 5,000.00",
+    "Date Transaction Details Withdrawals Deposits Balance",
+    "01/09/2026",
+    "EFTPOS DEBIT",
+    "MARKET STREET CAFE",
+    "12.00 0.00",
+    "4,988.00",
+    "02/09/2026 DEBIT CARD PURCHASE",
+    "COASTAL SUPPLIES NORTHBRIDGE",
+    "20.00",
+    "4,968.00",
+    "03/09/2026 PAYMENT BY AUTHORITY",
+    "CITY UTILITIES ACCOUNT",
+    "30.00",
+    "4,938.00",
+    "04/09/2026 WITHDRAWAL ONLINE",
+    "HOUSEHOLD PAYMENT 492018",
+    "40.00",
+    "4,898.00",
+    "Page 2 of 12",
+    "Date Transaction Details Withdrawals Deposits Balance",
+    "05/09/2026 WITHDRAWAL MOBILE",
+    "TRANSFER TO SAVINGS",
+    "50.00",
+    "4,848.00",
+    "06/09/2026",
+    "WITHDRAWAL-OSKO PAYMENT",
+    "JAMIE SMITH",
+    "60.00",
+    "4,788.00",
+    "07/09/2026 DEPOSIT",
+    "CASH DEPOSIT",
+    "0.00 100.00",
+    "4,888.00",
+    "08/09/2026 DEPOSIT ONLINE",
+    "PAYMENT FROM ALEX",
+    "200.00",
+    "5,088.00",
+    "09/09/2026",
+    "DEPOSIT-OSKO PAYMENT",
+    "PAYMENT FROM TAYLOR",
+    "300.00",
+    "5,388.00",
+    "10/09/2026 Closing balance 5,388.00",
+    "10/09/2026 Total credits 600.00",
+  ].join("\n");
+
+  const rows = parseStatementText(text, NOW);
+  assert.equal(rows.length, 9);
+  assert.deepEqual(rows.map((row) => row.amountCents), [1200, 2000, 3000, 4000, 5000, 6000, 10000, 20000, 30000]);
+  assert.deepEqual(rows.map((row) => row.direction), ["out", "out", "out", "out", "out", "out", "in", "in", "in"]);
+  assert.deepEqual(rows.map((row) => row.description), [
+    "EFTPOS DEBIT MARKET STREET CAFE",
+    "DEBIT CARD PURCHASE COASTAL SUPPLIES NORTHBRIDGE",
+    "PAYMENT BY AUTHORITY CITY UTILITIES ACCOUNT",
+    "WITHDRAWAL ONLINE HOUSEHOLD PAYMENT 492018",
+    "WITHDRAWAL MOBILE TRANSFER TO SAVINGS",
+    "WITHDRAWAL-OSKO PAYMENT JAMIE SMITH",
+    "DEPOSIT CASH DEPOSIT",
+    "DEPOSIT ONLINE PAYMENT FROM ALEX",
+    "DEPOSIT-OSKO PAYMENT PAYMENT FROM TAYLOR",
+  ]);
+});
+
 test("statement parser handles newest-first, markers, and yearless dates", () => {
   const text = [
     "Card statement 2026",

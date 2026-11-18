@@ -37,6 +37,7 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "./api";
+import { partitionSelectedStatementRows } from "../server/src/statementImportReview";
 import type {
   AccountType,
   AuthStatus,
@@ -1033,20 +1034,16 @@ function AccountsPage({
                   </label>
                 </>
               )}
-              <label>
-                Account type
-                <select onChange={(event) => setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value as AccountType } : item))} value={account.type}>
-                  {accountType === "super" ? (
+              {accountType !== "super" && (
+                <label>
+                  Account type
+                  <select onChange={(event) => setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value as AccountType } : item))} value={account.type}>
+                    <option value="cash">Cash or savings</option>
+                    <option value="offset">Mortgage offset</option>
                     <option value="super">Super</option>
-                  ) : (
-                    <>
-                      <option value="cash">Cash or savings</option>
-                      <option value="offset">Mortgage offset</option>
-                      <option value="super">Super</option>
-                    </>
-                  )}
-                </select>
-              </label>
+                  </select>
+                </label>
+              )}
               <label>
                 Balance (AUD)
                 <span className="money-input"><span>$</span><input inputMode="decimal" max="1000000000" min="-1000000000" onChange={(event) => setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, balance: event.target.value } : item))} placeholder="e.g. 5,000" required step="0.01" type="number" value={account.balance} /></span>
@@ -1151,48 +1148,50 @@ function StatementImport({ onImported }: { onImported: () => Promise<void> }) {
   }
 
   async function importSelected() {
-    const chosen = rows?.filter((row) => row.selected) ?? [];
-    if (chosen.length === 0) return;
+    const { entries: entryRows, bills: billRows } = partitionSelectedStatementRows(rows ?? []);
+    if (entryRows.length === 0 && billRows.length === 0) return;
     setError("");
     setBusy(true);
     try {
-      const entriesToImport = chosen
-        .filter((row) => row.destination === "spending" || row.destination === "income")
-        .map((row) => ({
-          kind: row.destination === "income" ? ("income" as const) : ("spending" as const),
+      const entriesToImport = entryRows.map((row) => ({
+        kind: row.destination === "income" ? ("income" as const) : ("spending" as const),
+        amountCents: row.amountCents,
+        category: row.category.trim() || (row.destination === "income" ? "Income" : "Other"),
+        description: row.description.slice(0, 200),
+        entryDate: row.date,
+      }));
+
+      const billsToImport = billRows.map((row) => {
+        const { name, provider } = extractBillDetails(row.description);
+        return {
+          name: name || row.description.slice(0, 100),
+          provider: provider || "Bill",
           amountCents: row.amountCents,
-          category: row.category.trim() || (row.destination === "income" ? "Income" : "Other"),
-          description: row.description.slice(0, 200),
-          entryDate: row.date,
-        }));
+          transactionDate: row.date,
+          notes: row.description.slice(0, 200),
+        };
+      });
 
-      const billsToImport = chosen
-        .filter((row) => row.destination === "bill")
-        .map((row) => {
-          const { name, provider } = extractBillDetails(row.description);
-          return {
-            name: name || row.description.slice(0, 100),
-            provider: provider || "Bill",
-            amountCents: row.amountCents,
-            dueDate: row.date,
-            recurrence: "monthly" as const,
-            notes: row.description.slice(0, 200),
-          };
-        });
-
-      const { imported, importedBills = 0 } = await api.importEntries({
+      const { imported, importedIncome, importedSpending, importedBills, failures } = await api.importEntries({
         entries: entriesToImport,
         bills: billsToImport,
       });
 
-      setRows(null);
+      setRows(failures.length > 0
+        ? (current) => current?.map((row) => ({ ...row, selected: false })) ?? null
+        : null);
       const summaryParts: string[] = [];
-      const spendingCount = entriesToImport.filter((e) => e.kind === "spending").length;
-      const incomeCount = entriesToImport.filter((e) => e.kind === "income").length;
-      if (spendingCount > 0) summaryParts.push(`${spendingCount} to Spending`);
-      if (incomeCount > 0) summaryParts.push(`${incomeCount} deposits to Income`);
+      if (importedSpending > 0) summaryParts.push(`${importedSpending} to Spending`);
+      if (importedIncome > 0) summaryParts.push(`${importedIncome} deposits to Income`);
       if (importedBills > 0) summaryParts.push(`${importedBills} bills moved to Bills tab`);
       setMessage(`Imported: ${summaryParts.join(", ") || "Transactions saved"}.`);
+      if (failures.length > 0) {
+        const failureSummary = [...new Set(failures.map((failure) => {
+          const destination = failure.destination === "bill" ? "Bills" : failure.destination === "income" ? "Income" : "Spending";
+          return `${destination}: ${failure.message}`;
+        }))].join(" ");
+        setError(`${imported + importedBills} transaction(s) imported; some selected transactions were not imported. ${failureSummary}`);
+      }
       await onImported();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The transactions could not be imported.");
@@ -1201,7 +1200,8 @@ function StatementImport({ onImported }: { onImported: () => Promise<void> }) {
     }
   }
 
-  const selectedCount = rows?.filter((row) => row.selected).length ?? 0;
+  const { entries: selectedEntries, bills: selectedBills } = partitionSelectedStatementRows(rows ?? []);
+  const importableCount = selectedEntries.length + selectedBills.length;
 
   return (
     <section className="panel statement-import">
@@ -1217,6 +1217,10 @@ function StatementImport({ onImported }: { onImported: () => Promise<void> }) {
       {message && <div className="mortgage-success" role="status">{message}</div>}
       {rows && (
         <>
+          <div className="statement-bulk-actions">
+            <button className="secondary-button" onClick={() => setRows((current) => current?.map((row) => ({ ...row, selected: true })) ?? null)} type="button">Check all</button>
+            <button className="secondary-button" onClick={() => setRows((current) => current?.map((row) => ({ ...row, selected: false })) ?? null)} type="button">Uncheck all</button>
+          </div>
           <div className="statement-table-wrap">
             <table className="statement-table">
               <thead><tr><th>Add</th><th>Date</th><th>Description</th><th>Destination</th><th>Category</th><th>Amount</th></tr></thead>
@@ -1230,6 +1234,7 @@ function StatementImport({ onImported }: { onImported: () => Promise<void> }) {
                       {row.destination === "income" && <em className="badge-income"> · deposit → Income</em>}
                       {row.destination === "bill" && <em className="badge-bill"> · move to Bills tab</em>}
                       {row.destination === "spending" && <em className="badge-spending"> · Spending</em>}
+                      {row.destination === "ignore" && <em> · Ignore (not imported)</em>}
                       {row.possibleDuplicate && <em> · may already be saved</em>}
                     </td>
                     <td>
@@ -1240,16 +1245,17 @@ function StatementImport({ onImported }: { onImported: () => Promise<void> }) {
                           const nextDest = event.target.value as StatementDestination;
                           update(index, {
                             destination: nextDest,
-                            category: nextDest === "income" ? "Income" : nextDest === "bill" ? "Bills" : row.category === "Income" ? "Other" : row.category,
+                            category: nextDest === "ignore" ? row.category : nextDest === "income" ? "Income" : nextDest === "bill" ? "Bills" : row.category === "Income" ? "Other" : row.category,
                           });
                         }}
                       >
                         <option value="spending">Spending</option>
                         <option value="income">Income (Deposit)</option>
                         <option value="bill">Bills tab (Bill)</option>
+                        <option value="ignore">Ignore</option>
                       </select>
                     </td>
-                    <td><input aria-label="Category" maxLength={80} onChange={(event) => update(index, { category: event.target.value })} value={row.category} /></td>
+                    <td><input aria-label="Category" disabled={row.destination === "ignore"} maxLength={80} onChange={(event) => update(index, { category: event.target.value })} value={row.category} /></td>
                     <td>{formatMoney(row.amountCents)}</td>
                   </tr>
                 ))}
@@ -1257,7 +1263,7 @@ function StatementImport({ onImported }: { onImported: () => Promise<void> }) {
             </table>
           </div>
           <div className="finance-form-actions">
-            <button className="primary-button" disabled={busy || selectedCount === 0} onClick={() => void importSelected()} type="button">Import {selectedCount} {selectedCount === 1 ? "transaction" : "transactions"}</button>
+            <button className="primary-button" disabled={busy || importableCount === 0} onClick={() => void importSelected()} type="button">Import {importableCount} {importableCount === 1 ? "transaction" : "transactions"}</button>
             <button className="secondary-button" onClick={() => setRows(null)} type="button">Cancel</button>
           </div>
         </>
@@ -1498,14 +1504,17 @@ function emptyPlannerDraft(kind: PlannerKind): PlannerDraft {
 }
 
 function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => Promise<void> }) {
-  const [items, setItems] = useState<PlannerItem[]>([]);
+  const [allItems, setItems] = useState<PlannerItem[]>([]);
   const [draft, setDraft] = useState<PlannerDraft>(() => emptyPlannerDraft(kind));
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [billTab, setBillTab] = useState<"upcoming" | "paid">("upcoming");
+  const [markingPaidId, setMarkingPaidId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const title = kind === "bill" ? "Bills" : "Insurance";
+  const pageTitle = kind === "bill" ? "Bills" : "Insurance";
+  const title = kind === "bill" ? billTab === "upcoming" ? "Upcoming bills" : "Paid bills" : pageTitle;
 
   async function loadItems() {
     setItems(await api.plannerItems(kind));
@@ -1537,10 +1546,10 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
       else await api.updatePlannerItem(editingId, payload);
       await loadItems();
       await onChanged();
-      setMessage(`${title.slice(0, -1)} ${editingId === null ? "added" : "updated"}.`);
+      setMessage(`${pageTitle.slice(0, -1)} ${editingId === null ? "added" : "updated"}.`);
       resetForm();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : `Unable to save ${title.toLowerCase()}.`);
+      setError(reason instanceof Error ? reason.message : `Unable to save ${pageTitle.toLowerCase()}.`);
     } finally {
       setSaving(false);
     }
@@ -1554,9 +1563,25 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
       await loadItems();
       await onChanged();
       if (editingId === item.id) resetForm();
-      setMessage(`${title.slice(0, -1)} deleted.`);
+      setMessage(`${pageTitle.slice(0, -1)} deleted.`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : `Unable to delete ${title.toLowerCase()} item.`);
+      setError(reason instanceof Error ? reason.message : `Unable to delete ${pageTitle.toLowerCase()} item.`);
+    }
+  }
+
+  async function markPaid(item: PlannerItem) {
+    setError("");
+    setMessage("");
+    setMarkingPaidId(item.id);
+    try {
+      await api.markPlannerItemPaid(item.id);
+      await loadItems();
+      await onChanged();
+      setMessage("Bill marked as paid.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to mark the bill as paid.");
+    } finally {
+      setMarkingPaidId(null);
     }
   }
 
@@ -1567,7 +1592,7 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
       name: item.name,
       provider: item.provider,
       amount: (item.amountCents / 100).toFixed(2),
-      dueDate: item.nextDueDate,
+      dueDate: item.status === "paid" ? item.dueDate : item.nextDueDate,
       recurrence: item.recurrence,
       notes: item.notes,
       propertyName: item.propertyName,
@@ -1576,9 +1601,17 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
     });
   }
 
+  const items = kind === "bill"
+    ? allItems
+      .filter((item) => (item.status ?? "upcoming") === billTab)
+      .sort((left, right) => billTab === "paid"
+        ? (right.paidDate ?? right.dueDate).localeCompare(left.paidDate ?? left.dueDate)
+        : left.nextDueDate.localeCompare(right.nextDueDate))
+    : allItems;
+
   return (
     <div className="secondary-page">
-      <div className="welcome-row"><div><div className="eyebrow">UPCOMING HOUSEHOLD COSTS</div><h1>{title}</h1><p className="welcome-subtitle">Track one-off or recurring {title.toLowerCase()} and their next due dates.</p></div></div>
+      <div className="welcome-row"><div><div className="eyebrow">UPCOMING HOUSEHOLD COSTS</div><h1>{pageTitle}</h1><p className="welcome-subtitle">Track one-off or recurring {pageTitle.toLowerCase()} and their next due dates.</p></div></div>
       <section className="panel finance-entry-panel">
         <div className="panel-heading"><div><h2>{editingId === null ? `Add ${kind === "bill" ? "bill" : "insurance policy"}` : `Edit ${kind === "bill" ? "bill" : "insurance policy"}`}</h2><p>Recurring items calculate the next due date from the date you enter.</p></div></div>
         <form className="finance-entry-form" onSubmit={submit}>
@@ -1606,7 +1639,13 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
         </form>
       </section>
       <section className="panel finance-list-panel">
-        <div className="panel-heading"><div><h2>{kind === "bill" ? "Upcoming bills" : "Policies and renewals"}</h2><p>Recurring due dates roll forward automatically.</p></div></div>
+        <div className="panel-heading"><div><h2>{kind === "bill" ? "Bills" : "Policies and renewals"}</h2><p>{kind === "bill" ? "Track upcoming bills and payments already made." : "Recurring due dates roll forward automatically."}</p></div></div>
+        {kind === "bill" && (
+          <div aria-label="Bill status" className="bill-status-tabs" role="tablist">
+            <button aria-selected={billTab === "upcoming"} className={billTab === "upcoming" ? "selected" : ""} onClick={() => setBillTab("upcoming")} role="tab" type="button">Upcoming</button>
+            <button aria-selected={billTab === "paid"} className={billTab === "paid" ? "selected" : ""} onClick={() => setBillTab("paid")} role="tab" type="button">Paid</button>
+          </div>
+        )}
         {loading ? <p className="mortgage-status">Loading {title.toLowerCase()}…</p> : items.length === 0 ? <p className="dashboard-section-empty">No {title.toLowerCase()} added yet.</p> : (
           <div className="finance-entry-list">{items.map((item) => (
             <article className="finance-entry-row" key={item.id}>
@@ -1620,6 +1659,8 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
                   </> : <span>{[item.provider, item.recurrence === "none" ? "One-off" : ({ weekly: "Weekly", fortnightly: "Fortnightly", monthly: "Monthly", quarterly: "Quarterly", yearly: "Yearly", none: "One-off" }[item.recurrence])].filter(Boolean).join(" · ")}{item.notes ? ` · ${item.notes}` : ""}</span>}
                 </div>
               <strong className="finance-entry-amount">{formatMoney(item.amountCents)}{kind === "insurance" && <small className="entry-amount-label">premium</small>}</strong>
+              {kind === "bill" && item.status === "paid" && <span className="bill-paid-status">Paid</span>}
+              {kind === "bill" && item.status === "upcoming" && <button className="secondary-button bill-mark-paid-button" disabled={markingPaidId === item.id} onClick={() => void markPaid(item)} type="button">{markingPaidId === item.id ? "Saving…" : "Mark paid"}</button>}
               <button className="account-delete-button" onClick={() => editItem(item)} type="button">Edit</button>
               <button className="account-delete-button" onClick={() => void removeItem(item)} type="button">Delete</button>
             </article>
@@ -1681,7 +1722,7 @@ function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
               ? "Repayment not set"
               : `${formatMoney(loan.repaymentCents)} ${loan.repaymentFrequency}`,
           })),
-          bill: bills.map((bill) => ({
+          bill: bills.filter((bill) => bill.status === "upcoming").map((bill) => ({
             id: bill.id,
             name: bill.name,
             detail: `${formatMoney(bill.amountCents)} ${bill.recurrence === "none" ? "one-off" : bill.recurrence}`,
@@ -2107,6 +2148,19 @@ function MortgagePage({ onSaved }: { onSaved: (mortgages: MortgageSplit[]) => vo
     }
   }
 
+  const hasMortgageData = savedMortgages.length > 0 || loans.length > 1 || loans.some((loan, index) => (
+    loan.group !== 0 ||
+    (loan.name.trim() !== "" && loan.name.trim() !== `Loan split ${index + 1}`) ||
+    (loan.propertyName.trim() !== "" && loan.propertyName.trim() !== "Home") ||
+    loan.propertyValue.trim() !== "" ||
+    loan.balance.trim() !== "" ||
+    loan.interestRate.trim() !== "" ||
+    loan.repayment.trim() !== "" ||
+    loan.rateType !== "variable" ||
+    loan.fixedRateEndDate.trim() !== "" ||
+    loan.repaymentFrequency !== "monthly"
+  ));
+
   return (
     <div className="secondary-page">
       <div className="welcome-row">
@@ -2157,10 +2211,10 @@ function MortgagePage({ onSaved }: { onSaved: (mortgages: MortgageSplit[]) => vo
                   Interest rate (optional)
                   <span className="suffix-input"><input inputMode="decimal" max="100" min="0" onChange={(event) => setLoans((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, interestRate: event.target.value } : item))} placeholder="e.g. 6.15" step="0.01" type="number" value={loan.interestRate} /><span>% p.a.</span></span>
                 </label>
-                <label className="fixed-rate-option">
-                  <input checked={loan.rateType === "fixed"} onChange={(event) => setLoans((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, rateType: event.target.checked ? "fixed" : "variable" } : item))} type="checkbox" />
-                  Fixed rate <span>{loan.rateType === "fixed" ? "Fixed" : "Variable"}</span>
-                </label>
+                <div aria-label="Interest rate type" className="rate-type-control" role="group">
+                  <button aria-pressed={loan.rateType === "variable"} onClick={() => setLoans((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, rateType: "variable" } : item))} type="button">Variable</button>
+                  <button aria-pressed={loan.rateType === "fixed"} onClick={() => setLoans((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, rateType: "fixed" } : item))} type="button">Fixed</button>
+                </div>
                 {loan.rateType === "fixed" && (
                   <label>
                     Fixed rate ends on
@@ -2188,10 +2242,12 @@ function MortgagePage({ onSaved }: { onSaved: (mortgages: MortgageSplit[]) => vo
             <div className="mortgage-total"><span>Total loan balance</span><strong>{formatMoney(loans.reduce((total, loan) => total + (Number(loan.balance) || 0) * 100, 0))}</strong></div>
             {error && <div className="form-error" role="alert">{error}</div>}
             {message && <div className="mortgage-success" role="status">{message}</div>}
-            <div className="mortgage-actions">
-              <button className="primary-button" disabled={saving} type="submit">{saving ? "Saving…" : savedMortgages.length ? "Update loan splits" : "Save loan splits"} <ArrowRight size={15} /></button>
-              {savedMortgages.length > 0 && <span>Last updated {new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric" }).format(new Date(savedMortgages[0].updatedAt))}</span>}
-            </div>
+            {hasMortgageData && (
+              <div className="mortgage-actions">
+                <button className="primary-button" disabled={saving} type="submit">{saving ? "Saving…" : savedMortgages.length ? "Update loan splits" : "Save loan splits"} <ArrowRight size={15} /></button>
+                {savedMortgages.length > 0 && <span>Last updated {new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric" }).format(new Date(savedMortgages[0].updatedAt))}</span>}
+              </div>
+            )}
           </form>
         )}
       </section>

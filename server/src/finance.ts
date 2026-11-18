@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 
 export type EntryKind = "income" | "spending";
 export type PlannerKind = "bill" | "insurance";
+export type PlannerStatus = "upcoming" | "paid";
 export type Recurrence = "none" | "weekly" | "fortnightly" | "monthly" | "quarterly" | "yearly";
 
 export interface FinanceEntry {
@@ -59,6 +60,8 @@ export interface BudgetInput {
 export interface PlannerItem {
   id: number;
   kind: PlannerKind;
+  status: PlannerStatus;
+  paidDate: string | null;
   name: string;
   provider: string;
   amountCents: number;
@@ -73,11 +76,33 @@ export interface PlannerItem {
 
 export type PolicyType = "home" | "income" | "life";
 
-export type PlannerItemInput = Omit<PlannerItem, "id" | "nextDueDate" | "propertyName" | "insuredValueCents" | "policyType"> & {
+export type PlannerItemInput = Omit<PlannerItem, "id" | "nextDueDate" | "status" | "paidDate" | "propertyName" | "insuredValueCents" | "policyType"> & {
   policyType?: PolicyType;
   propertyName?: string;
   insuredValueCents?: number;
 };
+
+export interface StatementBillInput {
+  name: string;
+  provider: string;
+  amountCents: number;
+  transactionDate: string;
+  notes: string;
+}
+
+export interface StatementImportFailure {
+  destination: EntryKind | "bill";
+  index: number;
+  message: string;
+}
+
+export interface StatementImportResult {
+  imported: number;
+  importedIncome: number;
+  importedSpending: number;
+  importedBills: number;
+  failures: StatementImportFailure[];
+}
 
 export interface FinanceReport {
   monthly: Array<{ month: string; incomeCents: number; spendingCents: number }>;
@@ -370,10 +395,11 @@ function getBudgetSourcePeriodCost(
   }
 
   const row = db.prepare(
-    `SELECT amount_cents AS amountCents, due_date AS dueDate, recurrence
+    `SELECT amount_cents AS amountCents, due_date AS dueDate, recurrence, status
      FROM planner_item WHERE id = ? AND kind = ?`,
-  ).get(sourceId, sourceType) as { amountCents: number; dueDate: string; recurrence: Recurrence } | undefined;
+  ).get(sourceId, sourceType) as { amountCents: number; dueDate: string; recurrence: Recurrence; status: PlannerStatus } | undefined;
   if (!row) return 0;
+  if (sourceType === "bill" && row.status !== "upcoming") return 0;
   if (row.recurrence === "none") return row.dueDate >= start && row.dueDate < end ? row.amountCents : 0;
   const periodsPerYear: Record<Exclude<Recurrence, "none">, number> = {
     weekly: 52,
@@ -419,27 +445,28 @@ export function listPlannerItems(
   now = new Date(),
 ): PlannerItem[] {
   return (db.prepare(
-        `SELECT id, kind, name, provider, amount_cents AS amountCents, due_date AS dueDate,
+        `SELECT id, kind, status, paid_date AS paidDate, name, provider, amount_cents AS amountCents, due_date AS dueDate,
           recurrence, notes, property_name AS propertyName, insured_value_cents AS insuredValueCents, policy_type AS policyType
      FROM planner_item WHERE kind = ? ORDER BY due_date, name COLLATE NOCASE`,
   ).all(kind) as Omit<PlannerItem, "nextDueDate">[]).map((item) => ({
     ...item,
-    nextDueDate: nextDueDate(item.dueDate, item.recurrence, now),
+    nextDueDate: item.status === "paid" ? item.paidDate ?? item.dueDate : nextDueDate(item.dueDate, item.recurrence, now),
   }));
 }
 
-export function createPlannerItem(db: Database.Database, input: PlannerItemInput): PlannerItem {
+export function createPlannerItem(
+  db: Database.Database,
+  input: PlannerItemInput,
+  status: PlannerStatus = "upcoming",
+  paidDate: string | null = null,
+): PlannerItem {
   validatePlannerItem(input);
+  validatePlannerStatus(input.kind, status, paidDate);
   const result = db.prepare(
-    `INSERT INTO planner_item (kind, name, provider, amount_cents, due_date, recurrence, notes, property_name, insured_value_cents, policy_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(input.kind, input.name.trim(), input.provider.trim(), input.amountCents, input.dueDate, input.recurrence, input.notes.trim(), input.propertyName?.trim() || "Home", input.insuredValueCents ?? 0, input.policyType ?? "home");
-  const item = db.prepare(
-    `SELECT id, kind, name, provider, amount_cents AS amountCents, due_date AS dueDate, recurrence, notes,
-            property_name AS propertyName, insured_value_cents AS insuredValueCents, policy_type AS policyType
-     FROM planner_item WHERE id = ?`,
-  ).get(result.lastInsertRowid) as Omit<PlannerItem, "nextDueDate">;
-  return { ...item, nextDueDate: nextDueDate(item.dueDate, item.recurrence, new Date()) };
+    `INSERT INTO planner_item (kind, status, paid_date, name, provider, amount_cents, due_date, recurrence, notes, property_name, insured_value_cents, policy_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(input.kind, status, paidDate, input.name.trim(), input.provider.trim(), input.amountCents, input.dueDate, input.recurrence, input.notes.trim(), input.propertyName?.trim() || "Home", input.insuredValueCents ?? 0, input.policyType ?? "home");
+  return getPlannerItem(db, Number(result.lastInsertRowid));
 }
 
 export function updatePlannerItem(db: Database.Database, id: number, input: PlannerItemInput): PlannerItem | null {
@@ -449,16 +476,126 @@ export function updatePlannerItem(db: Database.Database, id: number, input: Plan
      WHERE id = ?`,
       ).run(input.kind, input.name.trim(), input.provider.trim(), input.amountCents, input.dueDate, input.recurrence, input.notes.trim(), input.propertyName?.trim() || "Home", input.insuredValueCents ?? 0, input.policyType ?? "home", id);
   if (!result.changes) return null;
-  const item = db.prepare(
-        `SELECT id, kind, name, provider, amount_cents AS amountCents, due_date AS dueDate, recurrence, notes,
-              property_name AS propertyName, insured_value_cents AS insuredValueCents, policy_type AS policyType
-     FROM planner_item WHERE id = ?`,
-  ).get(id) as Omit<PlannerItem, "nextDueDate">;
-  return { ...item, nextDueDate: nextDueDate(item.dueDate, item.recurrence, new Date()) };
+  return getPlannerItem(db, id);
 }
 
 export function deletePlannerItem(db: Database.Database, id: number): boolean {
   return db.prepare("DELETE FROM planner_item WHERE id = ?").run(id).changes > 0;
+}
+
+export function importStatementBills(db: Database.Database, inputs: StatementBillInput[]): PlannerItem[] {
+  if (inputs.length > 2000) throw new Error("Import up to 2,000 transactions at a time.");
+  const importAll = db.transaction(() => inputs.map((input) => createPlannerItem(db, {
+    kind: "bill",
+    name: input.name,
+    provider: input.provider,
+    amountCents: input.amountCents,
+    dueDate: input.transactionDate,
+    recurrence: "none",
+    notes: input.notes,
+  }, "paid", input.transactionDate)));
+  return importAll();
+}
+
+export function importStatementBatch(
+  db: Database.Database,
+  entries: FinanceEntryInput[],
+  bills: StatementBillInput[],
+): StatementImportResult {
+  const result: StatementImportResult = {
+    imported: 0,
+    importedIncome: 0,
+    importedSpending: 0,
+    importedBills: 0,
+    failures: [],
+  };
+
+  if (entries.length > 2000) {
+    result.failures.push({ destination: "spending", index: -1, message: "Import up to 2,000 transactions at a time." });
+  } else {
+    entries.forEach((entry, index) => {
+      try {
+        createEntry(db, entry);
+        result.imported++;
+        if (entry.kind === "income") result.importedIncome++;
+        else result.importedSpending++;
+      } catch (error) {
+        result.failures.push({
+          destination: entry.kind === "income" ? "income" : "spending",
+          index,
+          message: error instanceof Error ? error.message : "This transaction could not be imported.",
+        });
+      }
+    });
+  }
+
+  if (bills.length > 2000) {
+    result.failures.push({ destination: "bill", index: -1, message: "Import up to 2,000 transactions at a time." });
+  } else {
+    bills.forEach((bill, index) => {
+      try {
+        importStatementBills(db, [bill]);
+        result.importedBills++;
+      } catch (error) {
+        result.failures.push({
+          destination: "bill",
+          index,
+          message: error instanceof Error ? error.message : "This bill transaction could not be imported.",
+        });
+      }
+    });
+  }
+  return result;
+}
+
+export function markPlannerItemPaid(
+  db: Database.Database,
+  id: number,
+  paidDate = asDateString(new Date()),
+): PlannerItem | null {
+  validateDate(paidDate, "paid");
+  const item = db.prepare(
+    `SELECT id, kind, status, paid_date AS paidDate, name, provider, amount_cents AS amountCents,
+            due_date AS dueDate, recurrence, notes, property_name AS propertyName,
+            insured_value_cents AS insuredValueCents, policy_type AS policyType
+     FROM planner_item WHERE id = ?`,
+  ).get(id) as Omit<PlannerItem, "nextDueDate"> | undefined;
+  if (!item || item.kind !== "bill" || item.status !== "upcoming") return null;
+
+  const occurrenceDate = nextDueDate(item.dueDate, item.recurrence, new Date(`${paidDate}T12:00:00`));
+  const completePayment = db.transaction((): number => {
+    if (item.recurrence === "none") {
+      db.prepare("UPDATE planner_item SET status = 'paid', paid_date = ? WHERE id = ? AND status = 'upcoming'")
+        .run(paidDate, id);
+      return id;
+    } else {
+      const afterOccurrence = new Date(`${occurrenceDate}T12:00:00`);
+      afterOccurrence.setDate(afterOccurrence.getDate() + 1);
+      const nextDate = nextDueDate(occurrenceDate, item.recurrence, afterOccurrence);
+      const history = db.prepare(
+        `INSERT INTO planner_item (kind, status, paid_date, name, provider, amount_cents, due_date, recurrence, notes,
+                                   property_name, insured_value_cents, policy_type)
+         VALUES ('bill', 'paid', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(paidDate, item.name, item.provider, item.amountCents, occurrenceDate, item.recurrence, item.notes, item.propertyName, item.insuredValueCents, item.policyType);
+      db.prepare("UPDATE planner_item SET due_date = ?, status = 'upcoming', paid_date = NULL WHERE id = ? AND status = 'upcoming'")
+        .run(nextDate, id);
+      return Number(history.lastInsertRowid);
+    }
+  });
+  return getPlannerItem(db, completePayment());
+}
+
+function getPlannerItem(db: Database.Database, id: number, now = new Date()): PlannerItem {
+  const item = db.prepare(
+    `SELECT id, kind, status, paid_date AS paidDate, name, provider, amount_cents AS amountCents, due_date AS dueDate,
+            recurrence, notes, property_name AS propertyName, insured_value_cents AS insuredValueCents, policy_type AS policyType
+     FROM planner_item WHERE id = ?`,
+  ).get(id) as Omit<PlannerItem, "nextDueDate"> | undefined;
+  if (!item) throw new Error("That bill could not be loaded after saving.");
+  return {
+    ...item,
+    nextDueDate: item.status === "paid" ? item.paidDate ?? item.dueDate : nextDueDate(item.dueDate, item.recurrence, now),
+  };
 }
 
 function validatePlannerItem(input: PlannerItemInput): void {
@@ -497,6 +634,16 @@ function validatePlannerItem(input: PlannerItemInput): void {
   }
 }
 
+function validatePlannerStatus(kind: PlannerKind, status: PlannerStatus, paidDate: string | null): void {
+  if (status !== "upcoming" && status !== "paid") throw new Error("Choose a valid bill status.");
+  if (status === "paid") {
+    if (kind !== "bill" || paidDate === null) throw new Error("Only a bill with a paid date can be marked paid.");
+    validateDate(paidDate, "paid");
+  } else if (paidDate !== null) {
+    throw new Error("Upcoming items cannot have a paid date.");
+  }
+}
+
 function nextDueDate(dueDate: string, recurrence: Recurrence, now: Date): string {
   const due = new Date(`${dueDate}T12:00:00`);
   if (recurrence === "none" || due >= now) return dueDate;
@@ -521,6 +668,7 @@ function nextDueDate(dueDate: string, recurrence: Recurrence, now: Date): string
 
 export function getFinanceReport(db: Database.Database, now = new Date()): FinanceReport {
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const paidBillSpending = paidBillSpendingByMonth(db, shiftDateMonths(`${month}-01`, -11), shiftDateMonths(`${month}-01`, 1));
   const actualMonthly = db.prepare(
     `SELECT substr(entry_date, 1, 7) AS month,
             SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END) AS incomeCents,
@@ -536,13 +684,13 @@ export function getFinanceReport(db: Database.Database, now = new Date()): Finan
   const scheduledIncome = recurringIncomeByMonth(db, reportMonths);
   const monthlyByMonth = new Map(actualMonthly.map((item) => [item.month, item]));
   const monthly = reportMonths
-    .filter((reportMonth) => monthlyByMonth.has(reportMonth) || (scheduledIncome.get(reportMonth) ?? 0) > 0)
+    .filter((reportMonth) => monthlyByMonth.has(reportMonth) || paidBillSpending.has(reportMonth) || (scheduledIncome.get(reportMonth) ?? 0) > 0)
     .map((reportMonth) => {
       const actual = monthlyByMonth.get(reportMonth);
       return {
         month: reportMonth,
         incomeCents: (actual?.incomeCents ?? 0) + (scheduledIncome.get(reportMonth) ?? 0),
-        spendingCents: actual?.spendingCents ?? 0,
+        spendingCents: (actual?.spendingCents ?? 0) + (paidBillSpending.get(reportMonth) ?? 0),
       };
     });
   const totals = db.prepare(
@@ -555,12 +703,35 @@ export function getFinanceReport(db: Database.Database, now = new Date()): Finan
      WHERE kind = 'spending' AND substr(entry_date, 1, 7) = ?
      GROUP BY category ORDER BY spendingCents DESC`,
   ).all(month) as FinanceReport["categories"];
+  const currentPaidBills = paidBillSpending.get(month) ?? 0;
+  if (currentPaidBills > 0) {
+    const billsCategory = categories.find((item) => item.category === "Bills");
+    if (billsCategory) billsCategory.spendingCents += currentPaidBills;
+    else categories.push({ category: "Bills", spendingCents: currentPaidBills });
+    categories.sort((left, right) => right.spendingCents - left.spendingCents);
+  }
   return {
     monthly,
     categories,
     incomeCents: (totals.incomeCents ?? 0) + (scheduledIncome.get(month) ?? 0),
-    spendingCents: totals.spendingCents ?? 0,
+    spendingCents: (totals.spendingCents ?? 0) + currentPaidBills,
   };
+}
+
+function paidBillSpendingByMonth(db: Database.Database, start: string, end: string): Map<string, number> {
+  const rows = db.prepare(
+    `SELECT substr(paid_date, 1, 7) AS month, SUM(amount_cents) AS spendingCents
+     FROM planner_item
+     WHERE kind = 'bill' AND status = 'paid' AND paid_date >= ? AND paid_date < ?
+     GROUP BY substr(paid_date, 1, 7)`,
+  ).all(start, end) as Array<{ month: string; spendingCents: number }>;
+  return new Map(rows.map((row) => [row.month, row.spendingCents]));
+}
+
+function shiftDateMonths(date: string, months: number): string {
+  const result = new Date(`${date}T00:00:00`);
+  result.setMonth(result.getMonth() + months);
+  return asDateString(result);
 }
 
 export function getDashboardEntryHistory(db: Database.Database, now = new Date()): Array<{
@@ -569,12 +740,18 @@ export function getDashboardEntryHistory(db: Database.Database, now = new Date()
   spendingCents: number;
 }> {
   const actual = db.prepare(
-    `SELECT substr(entry_date, 1, 7) AS month,
-            SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END) AS incomeCents,
-            SUM(CASE WHEN kind = 'spending' THEN amount_cents ELSE 0 END) AS spendingCents
-     FROM finance_entry
-     WHERE entry_date >= date(?, '-5 months', 'start of month')
-     GROUP BY substr(entry_date, 1, 7) ORDER BY month`,
+    `SELECT month, SUM(incomeCents) AS incomeCents, SUM(spendingCents) AS spendingCents
+     FROM (
+       SELECT substr(entry_date, 1, 7) AS month,
+              CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END AS incomeCents,
+              CASE WHEN kind = 'spending' THEN amount_cents ELSE 0 END AS spendingCents
+       FROM finance_entry
+       UNION ALL
+       SELECT substr(paid_date, 1, 7), 0, amount_cents
+       FROM planner_item WHERE kind = 'bill' AND status = 'paid' AND paid_date IS NOT NULL
+     )
+     WHERE month >= strftime('%Y-%m', date(?, '-5 months', 'start of month'))
+     GROUP BY month ORDER BY month`,
   ).all(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`) as Array<{
     month: string;
     incomeCents: number;
@@ -604,7 +781,8 @@ export function getPlannerUpcoming(
 ): Array<{ id: number; title: string; dueDate: string; amountCents: number; kind: "bill" | "renewal" }> {
   const rows = db.prepare(
     `SELECT id, name AS title, due_date AS dueDate, amount_cents AS amountCents,
-            kind, recurrence FROM planner_item`,
+            kind, recurrence FROM planner_item
+     WHERE kind = 'insurance' OR status = 'upcoming'`,
   ).all() as Array<{
     id: number;
     title: string;

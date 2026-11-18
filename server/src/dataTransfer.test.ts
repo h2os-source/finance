@@ -5,7 +5,7 @@ import { createDatabase } from "./database";
 import { createEntry } from "./finance";
 import { exportBackup, restoreBackup } from "./dataTransfer";
 import { getLoans, saveLoans } from "./loans";
-import { listBudgets, saveBudgets } from "./finance";
+import { listBudgets, listPlannerItems, saveBudgets } from "./finance";
 
 test("backup restores finance data without replacing the destination account", async () => {
   const source = createDatabase(":memory:");
@@ -57,6 +57,8 @@ test("version 1 backups restore without general loans", () => {
     delete mortgage.property_value_cents;
   }
   for (const item of backup.tables.planner_item) {
+    delete item.status;
+    delete item.paid_date;
     delete item.property_name;
     delete item.insured_value_cents;
   }
@@ -85,6 +87,7 @@ test("version 1 backups restore without general loans", () => {
   assert.deepEqual(getLoans(destination), []);
   assert.equal(listBudgets(destination, new Date().toISOString().slice(0, 7))[0].sourceType, "other");
   assert.equal(listBudgets(destination, new Date().toISOString().slice(0, 7))[0].frequency, "monthly");
+  assert.ok(listPlannerItems(destination, "insurance").every((item) => item.status === "upcoming" && item.paidDate === null));
   source.close();
   destination.close();
 });

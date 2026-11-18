@@ -91,8 +91,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ pdfBase64 }),
     }),
-  importEntries: (payload: { entries?: FinanceEntryInput[]; bills?: Array<{ name: string; provider?: string; amountCents: number; dueDate: string; recurrence?: Recurrence; notes?: string }> } | FinanceEntryInput[]) =>
-    request<{ imported: number; importedBills?: number }>("/api/entries/import", {
+  importEntries: (payload: { entries?: FinanceEntryInput[]; bills?: Array<{ name: string; provider?: string; amountCents: number; transactionDate: string; notes?: string }> } | FinanceEntryInput[]) =>
+    request<{
+      imported: number;
+      importedIncome: number;
+      importedSpending: number;
+      importedBills: number;
+      failures: Array<{ destination: string; index: number; message: string }>;
+    }>("/api/entries/import", {
       method: "POST",
       body: JSON.stringify(Array.isArray(payload) ? { entries: payload } : payload),
     }),
@@ -110,6 +116,8 @@ export const api = {
     request<PlannerItem>("/api/planner", { method: "POST", body: JSON.stringify(item) }),
   updatePlannerItem: (id: number, item: PlannerItemInput) =>
     request<PlannerItem>(`/api/planner/${id}`, { method: "PUT", body: JSON.stringify(item) }),
+  markPlannerItemPaid: (id: number) =>
+    request<PlannerItem>(`/api/planner/${id}/paid`, { method: "POST" }),
   deletePlannerItem: (id: number) => request<void>(`/api/planner/${id}`, { method: "DELETE" }),
   report: () => request<FinanceReport>("/api/reports"),
 };

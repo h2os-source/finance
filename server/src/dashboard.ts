@@ -114,9 +114,15 @@ export function getDashboardData(db: Database.Database, now = new Date()): Dashb
   const manualEntryCount = (db.prepare("SELECT COUNT(*) AS count FROM finance_entry").get() as {
     count: number;
   }).count;
+  const paidBillCount = (db.prepare(
+    "SELECT COUNT(*) AS count FROM planner_item WHERE kind = 'bill' AND status = 'paid'",
+  ).get() as { count: number }).count;
   const recurringIncome = listRecurringIncome(db, now);
-  const hasIncomeData = manualEntryCount > 0 || recurringIncome.length > 0;
+  const hasIncomeData = manualEntryCount > 0 || paidBillCount > 0 || recurringIncome.length > 0;
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const paidBillSpendingCents = (db.prepare(
+    "SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM planner_item WHERE kind = 'bill' AND status = 'paid' AND substr(paid_date, 1, 7) = ?",
+  ).get(currentMonth) as { amount: number }).amount;
   const monthly = hasIncomeData
     ? db.prepare(
       `SELECT
@@ -149,8 +155,8 @@ export function getDashboardData(db: Database.Database, now = new Date()): Dashb
     ),
     otherLoanCents,
     monthlyIncomeCents: (monthly?.incomeCents ?? 0) + recurringIncomeForMonth(db, currentMonth),
-    monthlySpendingCents: monthly?.spendingCents ?? 0,
-    monthlySurplusCents: (monthly?.incomeCents ?? 0) + recurringIncomeForMonth(db, currentMonth) - (monthly?.spendingCents ?? 0),
+    monthlySpendingCents: (monthly?.spendingCents ?? 0) + paidBillSpendingCents,
+    monthlySurplusCents: (monthly?.incomeCents ?? 0) + recurringIncomeForMonth(db, currentMonth) - (monthly?.spendingCents ?? 0) - paidBillSpendingCents,
     spendingHistory: hasIncomeData ? getDashboardEntryHistory(db, now) : db
       .prepare(
         "SELECT month, income_cents AS incomeCents, spending_cents AS spendingCents FROM monthly_summary ORDER BY month",

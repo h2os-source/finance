@@ -95,7 +95,7 @@ export interface FinanceEntry {
 
 export interface FinanceEntryInput extends Omit<FinanceEntry, "id"> {}
 
-export type StatementDestination = "spending" | "income" | "bill";
+export type StatementDestination = "spending" | "income" | "bill" | "ignore";
 
 export interface StatementTransaction {
   date: string;
@@ -137,6 +137,8 @@ export type BudgetFrequency = "weekly" | "fortnightly" | "monthly";
 export interface PlannerItem {
   id: number;
   kind: PlannerKind;
+  status: PlannerStatus;
+  paidDate: string | null;
   name: string;
   provider: string;
   amountCents: number;
@@ -149,9 +151,11 @@ export interface PlannerItem {
   nextDueDate: string;
 }
 
+export type PlannerStatus = "upcoming" | "paid";
+
 export type PolicyType = "home" | "income" | "life";
 
-export interface PlannerItemInput extends Omit<PlannerItem, "id" | "nextDueDate"> {}
+export interface PlannerItemInput extends Omit<PlannerItem, "id" | "nextDueDate" | "status" | "paidDate"> {}
 
 export interface FinanceReport {
   monthly: Array<{ month: string; incomeCents: number; spendingCents: number }>;
