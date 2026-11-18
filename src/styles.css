@@ -326,6 +326,11 @@ h1, h2, p { margin-top: 0; }
 .settings-section-icon { align-items: center; background: #f0f2ff; border-radius: 8px; color: #7486d0; display: flex; height: 35px; justify-content: center; width: 35px; }
 .security-setting-icon { background: #eaf6f0; color: #65a083; }
 .settings-field { max-width: 380px; }.settings-field input { background: #f9fafb; color: #748094; cursor: not-allowed; }
+.settings-password-form { display: grid; gap: 12px; max-width: 460px; }
+.settings-password-form .settings-field { max-width: none; }
+.settings-password-form .settings-field input { background: #fff; color: #37445b; cursor: text; }
+.settings-password-form .settings-field input:focus { border-color: #8ea3e5; box-shadow: 0 0 0 3px #788fdb1a; }
+.settings-password-form .primary-button { justify-self: start; }
 .settings-divider { background: #eff1f4; height: 1px; margin: 23px 0; }
 .security-status { align-items: center; display: flex; gap: 12px; margin: 12px 0; }
 .security-status > span:first-child { align-items: center; background: #f6f8fa; border-radius: 8px; color: #8090a4; display: flex; height: 34px; justify-content: center; width: 34px; }

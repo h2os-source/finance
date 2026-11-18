@@ -134,6 +134,40 @@ app.post("/api/auth/login", async (req, res, next) => {
   }
 });
 
+app.put("/api/auth/password", requireAuth, async (req, res, next) => {
+  const body = req.body as {
+    currentPassword?: unknown;
+    newPassword?: unknown;
+    confirmNewPassword?: unknown;
+  };
+  if (
+    typeof body.currentPassword !== "string" ||
+    typeof body.newPassword !== "string" ||
+    typeof body.confirmNewPassword !== "string"
+  ) {
+    res.status(400).json({ error: "Enter your current password and both new password fields." });
+    return;
+  }
+  if (body.newPassword !== body.confirmNewPassword) {
+    res.status(400).json({ error: "New passwords do not match." });
+    return;
+  }
+
+  try {
+    await auth.changePassword(body.currentPassword, body.newPassword);
+    res.status(204).end();
+  } catch (error) {
+    if (error instanceof Error && (
+      error.message === "Current password is incorrect." ||
+      error.message.startsWith("Choose a password")
+    )) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    next(error);
+  }
+});
+
 app.post("/api/auth/logout", (req, res) => {
   const token = readCookie(req, cookieName);
   if (token) auth.deleteSession(token);

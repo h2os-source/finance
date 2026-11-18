@@ -48,6 +48,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ password }),
     }),
+  changePassword: (currentPassword: string, newPassword: string, confirmNewPassword: string) =>
+    request<void>("/api/auth/password", {
+      method: "PUT",
+      body: JSON.stringify({ currentPassword, newPassword, confirmNewPassword }),
+    }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   dashboard: () => request<DashboardData>("/api/dashboard"),
   downloadBackup: async () => {

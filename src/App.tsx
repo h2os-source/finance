@@ -852,6 +852,30 @@ function SettingsPage({
   const [transferBusy, setTransferBusy] = useState(false);
   const [transferMessage, setTransferMessage] = useState("");
   const [transferError, setTransferError] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPasswordError("");
+    setPasswordMessage("");
+    setPasswordBusy(true);
+    try {
+      await api.changePassword(currentPassword, newPassword, confirmNewPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setPasswordMessage("Password changed successfully.");
+    } catch (reason) {
+      setPasswordError(reason instanceof Error ? reason.message : "The password could not be changed.");
+    } finally {
+      setPasswordBusy(false);
+    }
+  }
 
   async function downloadBackup() {
     setTransferBusy(true);
@@ -902,6 +926,16 @@ function SettingsPage({
         <div className="settings-section-title"><div className="settings-section-icon security-setting-icon"><ShieldCheck size={18} /></div><div><h2>Privacy &amp; security</h2><p>Your dashboard is only available on this computer.</p></div></div>
         <div className="security-status"><span><LockKeyhole size={17} /></span><div><strong>Password protection is on</strong><small>Your password is securely hashed and never stored as plain text.</small></div><span className="enabled-pill"><Check size={13} /> Enabled</span></div>
         <div className="security-status"><span><House size={17} /></span><div><strong>Local-only connection</strong><small>The app listens on this computer and is not exposed to your network.</small></div><span className="enabled-pill"><Check size={13} /> Private</span></div>
+        <div className="settings-divider" />
+        <div className="settings-section-title"><div className="settings-section-icon security-setting-icon"><LockKeyhole size={18} /></div><div><h2>Change password</h2><p>Confirm your current password before choosing a new one.</p></div></div>
+        <form className="settings-password-form" onSubmit={changePassword}>
+          <label className="settings-field">Current password<input autoComplete="current-password" maxLength={256} onChange={(event) => setCurrentPassword(event.target.value)} required type="password" value={currentPassword} /></label>
+          <label className="settings-field">New password<input autoComplete="new-password" maxLength={256} minLength={12} onChange={(event) => setNewPassword(event.target.value)} required type="password" value={newPassword} /></label>
+          <label className="settings-field">Confirm new password<input autoComplete="new-password" maxLength={256} minLength={12} onChange={(event) => setConfirmNewPassword(event.target.value)} required type="password" value={confirmNewPassword} /></label>
+          {passwordError && <div className="form-error" role="alert">{passwordError}</div>}
+          {passwordMessage && <div className="mortgage-success" role="status">{passwordMessage}</div>}
+          <button className="primary-button" disabled={passwordBusy} type="submit">{passwordBusy ? "Changing password..." : "Change password"}</button>
+        </form>
         <div className="settings-divider" />
         <div className="settings-section-title"><div className="settings-section-icon"><Download size={18} /></div><div><h2>Data portability</h2><p>Move your household data to another computer.</p></div></div>
         <div className="settings-transfer-actions">

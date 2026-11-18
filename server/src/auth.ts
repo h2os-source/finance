@@ -19,6 +19,7 @@ export interface AuthService {
   hasUser(): boolean;
   createUser(displayName: string, password: string): Promise<void>;
   verifyPassword(password: string): Promise<AuthUser | null>;
+  changePassword(currentPassword: string, newPassword: string): Promise<void>;
   createSession(): { token: string; expiresAt: number };
   getSession(token: string): AuthUser | null;
   deleteSession(token: string): void;
@@ -36,9 +37,7 @@ export function createAuthService(db: Database.Database): AuthService {
       if (name.length < 1 || name.length > 80) {
         throw new Error("Enter a name between 1 and 80 characters.");
       }
-      if (password.length < 12 || password.length > 256) {
-        throw new Error("Choose a password between 12 and 256 characters.");
-      }
+      validatePassword(password);
       if (userRow.get()) {
         throw new Error("An account has already been set up.");
       }
@@ -58,15 +57,25 @@ export function createAuthService(db: Database.Database): AuthService {
       const user = userRow.get() as
         | { displayName: string; passwordSalt: string; passwordHash: string }
         | undefined;
-      if (!user) return null;
-
-      const salt = Buffer.from(user.passwordSalt, "hex");
-      const storedHash = Buffer.from(user.passwordHash, "hex");
-      const candidateHash = (await scrypt(password, salt, storedHash.length)) as Buffer;
-      if (candidateHash.length !== storedHash.length || !timingSafeEqual(candidateHash, storedHash)) {
-        return null;
-      }
+      if (!user || !(await passwordMatches(password, user.passwordSalt, user.passwordHash))) return null;
       return { displayName: user.displayName };
+    },
+    async changePassword(currentPassword, newPassword) {
+      const user = userRow.get() as
+        | { displayName: string; passwordSalt: string; passwordHash: string }
+        | undefined;
+      if (!user || !(await passwordMatches(currentPassword, user.passwordSalt, user.passwordHash))) {
+        throw new Error("Current password is incorrect.");
+      }
+      validatePassword(newPassword);
+
+      const salt = randomBytes(16);
+      const hash = (await scrypt(newPassword, salt, KEY_LENGTH)) as Buffer;
+      const result = db.prepare(
+        `UPDATE app_user SET password_salt = ?, password_hash = ?
+         WHERE id = 1 AND password_salt = ? AND password_hash = ?`,
+      ).run(salt.toString("hex"), hash.toString("hex"), user.passwordSalt, user.passwordHash);
+      if (result.changes !== 1) throw new Error("Current password is incorrect.");
     },
     createSession() {
       const token = randomBytes(32).toString("base64url");
@@ -93,6 +102,20 @@ export function createAuthService(db: Database.Database): AuthService {
       db.prepare("DELETE FROM session WHERE token_hash = ?").run(hashToken(token));
     },
   };
+}
+
+async function passwordMatches(password: string, saltHex: string, hashHex: string): Promise<boolean> {
+  if (password.length > 256) return false;
+  const salt = Buffer.from(saltHex, "hex");
+  const storedHash = Buffer.from(hashHex, "hex");
+  const candidateHash = (await scrypt(password, salt, storedHash.length)) as Buffer;
+  return candidateHash.length === storedHash.length && timingSafeEqual(candidateHash, storedHash);
+}
+
+function validatePassword(password: string): void {
+  if (password.length < 12 || password.length > 256) {
+    throw new Error("Choose a password between 12 and 256 characters.");
+  }
 }
 
 function hashToken(token: string): string {
