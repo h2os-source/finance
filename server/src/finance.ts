@@ -284,10 +284,17 @@ function recurringIncomeByMonth(
   return totals;
 }
 
+interface ScheduledIncomeOccurrence {
+  date: string;
+  month: string;
+  category: string;
+  amountCents: number;
+}
+
 function recurringIncomeOccurrencesByMonth(
   db: Database.Database,
   months: string[],
-): Array<{ month: string; category: string; amountCents: number }> {
+): ScheduledIncomeOccurrence[] {
   if (!months.length) return [];
   const schedules = db.prepare(
     "SELECT amount_cents AS amountCents, category, next_date AS nextDate, recurrence FROM recurring_income",
@@ -297,7 +304,7 @@ function recurringIncomeOccurrencesByMonth(
   const rangeStart = new Date(`${firstMonth}-01T00:00:00`);
   const rangeEnd = new Date(`${lastMonth}-01T00:00:00`);
   rangeEnd.setMonth(rangeEnd.getMonth() + 1);
-  const occurrences: Array<{ month: string; category: string; amountCents: number }> = [];
+  const occurrences: ScheduledIncomeOccurrence[] = [];
 
   for (const schedule of schedules) {
     let index = 0;
@@ -308,6 +315,7 @@ function recurringIncomeOccurrencesByMonth(
     }
     while (occurrence < rangeEnd) {
       occurrences.push({
+        date: asDateString(occurrence),
         month: asDateString(occurrence).slice(0, 7),
         category: schedule.category,
         amountCents: schedule.amountCents,
@@ -317,6 +325,50 @@ function recurringIncomeOccurrencesByMonth(
     }
   }
   return occurrences;
+}
+
+function monthsWithinRange(start: string, endExclusive: string): string[] {
+  const months: string[] = [];
+  const cursor = new Date(`${start.slice(0, 7)}-01T12:00:00`);
+  while (localDateString(cursor) < endExclusive) {
+    months.push(localDateString(cursor).slice(0, 7));
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return months;
+}
+
+function incomeForRange(
+  db: Database.Database,
+  start: string,
+  endExclusive: string,
+  entries?: ReadonlyArray<Pick<FinanceEntry, "amountCents" | "category" | "entryDate">>,
+): { incomeCents: number; scheduledOccurrences: ScheduledIncomeOccurrence[] } {
+  const actualEntries = entries ?? db.prepare(
+    `SELECT amount_cents AS amountCents, category, entry_date AS entryDate
+     FROM finance_entry WHERE kind = 'income' AND entry_date >= ? AND entry_date < ?`,
+  ).all(start, endExclusive) as Array<Pick<FinanceEntry, "amountCents" | "category" | "entryDate">>;
+  const recordedByCategory = new Map<string, number>();
+  const actualIncomeCents = actualEntries.reduce((total, entry) => {
+    const category = entry.category.trim().toLocaleLowerCase();
+    recordedByCategory.set(category, (recordedByCategory.get(category) ?? 0) + 1);
+    return total + entry.amountCents;
+  }, 0);
+  const scheduledOccurrences: ScheduledIncomeOccurrence[] = [];
+  for (const occurrence of recurringIncomeOccurrencesByMonth(db, monthsWithinRange(start, endExclusive))) {
+    if (occurrence.date < start || occurrence.date >= endExclusive) continue;
+    const category = occurrence.category.trim().toLocaleLowerCase();
+    const recordedCount = recordedByCategory.get(category) ?? 0;
+    if (recordedCount > 0) {
+      // A recorded payment replaces one projected occurrence in the same income category.
+      recordedByCategory.set(category, recordedCount - 1);
+    } else {
+      scheduledOccurrences.push(occurrence);
+    }
+  }
+  return {
+    incomeCents: actualIncomeCents + scheduledOccurrences.reduce((total, item) => total + item.amountCents, 0),
+    scheduledOccurrences,
+  };
 }
 
 export function recurringIncomeForMonth(db: Database.Database, month: string): number {
@@ -473,27 +525,7 @@ export function saveBudgets(db: Database.Database, budgets: BudgetInput[]): Budg
 export function getBudgetBuilderSummary(db: Database.Database, now = new Date()): BudgetBuilderSummary {
   const start = localDateString(new Date(now.getFullYear(), now.getMonth(), 1));
   const end = localDateString(new Date(now.getFullYear(), now.getMonth() + 1, 1));
-  const actualIncome = db.prepare(
-    `SELECT amount_cents AS amountCents, category FROM finance_entry
-     WHERE kind = 'income' AND entry_date >= ? AND entry_date < ?`,
-  ).all(start, end) as Array<{ amountCents: number; category: string }>;
-  const recordedByCategory = new Map<string, number>();
-  const actualIncomeCents = actualIncome.reduce((total, entry) => {
-    const category = entry.category.trim().toLocaleLowerCase();
-    recordedByCategory.set(category, (recordedByCategory.get(category) ?? 0) + 1);
-    return total + entry.amountCents;
-  }, 0);
-  const scheduledIncomeCents = recurringIncomeOccurrencesByMonth(db, [start.slice(0, 7)])
-    .reduce((total, occurrence) => {
-      const category = occurrence.category.trim().toLocaleLowerCase();
-      const recordedCount = recordedByCategory.get(category) ?? 0;
-      if (recordedCount > 0) {
-        // A recorded payment replaces one projected occurrence in the same income category.
-        recordedByCategory.set(category, recordedCount - 1);
-        return total;
-      }
-      return total + occurrence.amountCents;
-    }, 0);
+  const { incomeCents } = incomeForRange(db, start, end);
 
   const mortgageCents = (db.prepare(
     `SELECT repayment_cents AS amountCents, repayment_frequency AS frequency
@@ -527,7 +559,7 @@ export function getBudgetBuilderSummary(db: Database.Database, now = new Date())
   }, 0);
 
   return {
-    incomeCents: actualIncomeCents + scheduledIncomeCents,
+    incomeCents,
     fixedCommitmentsCents: mortgageCents + loanCents + billCents + insuranceCents,
     month: start.slice(0, 7),
   };
@@ -990,9 +1022,13 @@ export function getFinanceReport(
      WHERE kind = 'bill' AND status = 'paid' AND paid_date >= ? AND paid_date < ?`,
   ).all(range.startDate, range.endDateExclusive) as Array<{ amountCents: number; paidDate: string }>;
 
-  const incomeCents = actualEntries
-    .filter((entry) => entry.kind === "income")
-    .reduce((total, entry) => total + entry.amountCents, 0);
+  const income = incomeForRange(
+    db,
+    range.startDate,
+    range.endDateExclusive,
+    actualEntries.filter((entry) => entry.kind === "income"),
+  );
+  const incomeCents = income.incomeCents;
   const spendingEntries = actualEntries.filter((entry) => entry.kind === "spending");
   const spendingCents = spendingEntries.reduce((total, entry) => total + entry.amountCents, 0);
   const billsPaidCents = paidBills.reduce((total, bill) => total + bill.amountCents, 0);
@@ -1011,6 +1047,10 @@ export function getFinanceReport(
     if (!bucket) continue;
     if (entry.kind === "income") bucket.incomeCents += entry.amountCents;
     else bucket.spendingCents += entry.amountCents;
+  }
+  for (const occurrence of income.scheduledOccurrences) {
+    const bucket = buckets.get(bucketForDate(occurrence.date));
+    if (bucket) bucket.incomeCents += occurrence.amountCents;
   }
   for (const bill of paidBills) {
     const bucket = buckets.get(bucketForDate(bill.paidDate));

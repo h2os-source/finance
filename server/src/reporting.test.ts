@@ -4,6 +4,7 @@ import { createDatabase } from "./database";
 import {
   createEntry,
   createPlannerItem,
+  createRecurringIncome,
   getFinanceReport,
   importStatementBills,
 } from "./finance";
@@ -27,6 +28,60 @@ test("a dated income payment appears only in the week containing its transaction
   const followingWeek = getFinanceReport(db, { unit: "week", date: "2026-11-26" }, now);
   assert.equal(containingWeek.incomeCents, 500000);
   assert.equal(followingWeek.incomeCents, 0);
+  db.close();
+});
+
+test("recurring Income occurrences appear in their scheduled week, month, and financial year", () => {
+  const db = createReportDatabase();
+  createRecurringIncome(db, {
+    amountCents: 500_000,
+    category: "Salary",
+    description: "Monthly pay",
+    nextDate: "2026-11-19",
+    recurrence: "monthly",
+  });
+
+  const payWeek = getFinanceReport(db, { unit: "week", date: "2026-11-19" }, now);
+  assert.equal(payWeek.incomeCents, 500_000);
+  assert.equal(payWeek.netCashFlowCents, 500_000);
+  assert.equal(payWeek.series.find((item) => item.bucket === "2026-11-19")?.incomeCents, 500_000);
+  assert.equal(getFinanceReport(db, { unit: "week", date: "2026-11-26" }, now).incomeCents, 0);
+
+  const november = getFinanceReport(db, { unit: "month", date: "2026-11-01" }, now);
+  assert.equal(november.incomeCents, 500_000);
+  assert.equal(november.series.find((item) => item.bucket === "2026-11-19")?.incomeCents, 500_000);
+  assert.equal(getFinanceReport(db, { unit: "month", date: "2026-10-01" }, now).incomeCents, 0);
+  assert.equal(getFinanceReport(db, { unit: "month", date: "2026-12-01" }, now).incomeCents, 500_000);
+  assert.equal(getFinanceReport(db, { unit: "week", date: "2026-12-19" }, now).incomeCents, 500_000);
+
+  const financialYear = getFinanceReport(db, { unit: "financialYear", date: "2026-11-19" }, now);
+  assert.equal(financialYear.incomeCents, 4_000_000);
+  assert.equal(financialYear.series.find((item) => item.bucket === "2026-11")?.incomeCents, 500_000);
+  assert.equal(getFinanceReport(db, { unit: "financialYear", date: "2025-11-19" }, now).incomeCents, 0);
+  db.close();
+});
+
+test("a dated Income entry replaces one same-category recurring occurrence in Reports", () => {
+  const db = createReportDatabase();
+  createRecurringIncome(db, {
+    amountCents: 500_000,
+    category: "Salary",
+    description: "Monthly pay",
+    nextDate: "2026-11-19",
+    recurrence: "monthly",
+  });
+  createEntry(db, {
+    kind: "income",
+    amountCents: 525_000,
+    category: "Salary",
+    description: "Pay recorded",
+    entryDate: "2026-11-19",
+  });
+
+  const report = getFinanceReport(db, { unit: "week", date: "2026-11-19" }, now);
+  assert.equal(report.incomeCents, 525_000);
+  assert.equal(report.netCashFlowCents, 525_000);
+  assert.equal(report.series.find((item) => item.bucket === "2026-11-19")?.incomeCents, 525_000);
   db.close();
 });
 
