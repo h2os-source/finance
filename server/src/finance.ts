@@ -278,15 +278,26 @@ function recurringIncomeByMonth(
   months: string[],
 ): Map<string, number> {
   const totals = new Map(months.map((month) => [month, 0]));
-  if (!months.length) return totals;
+  for (const occurrence of recurringIncomeOccurrencesByMonth(db, months)) {
+    totals.set(occurrence.month, (totals.get(occurrence.month) ?? 0) + occurrence.amountCents);
+  }
+  return totals;
+}
+
+function recurringIncomeOccurrencesByMonth(
+  db: Database.Database,
+  months: string[],
+): Array<{ month: string; category: string; amountCents: number }> {
+  if (!months.length) return [];
   const schedules = db.prepare(
-    "SELECT amount_cents AS amountCents, next_date AS nextDate, recurrence FROM recurring_income",
-  ).all() as Array<Pick<RecurringIncome, "amountCents" | "nextDate" | "recurrence">>;
+    "SELECT amount_cents AS amountCents, category, next_date AS nextDate, recurrence FROM recurring_income",
+  ).all() as Array<Pick<RecurringIncome, "amountCents" | "category" | "nextDate" | "recurrence">>;
   const firstMonth = months[0];
   const lastMonth = months[months.length - 1];
   const rangeStart = new Date(`${firstMonth}-01T00:00:00`);
   const rangeEnd = new Date(`${lastMonth}-01T00:00:00`);
   rangeEnd.setMonth(rangeEnd.getMonth() + 1);
+  const occurrences: Array<{ month: string; category: string; amountCents: number }> = [];
 
   for (const schedule of schedules) {
     let index = 0;
@@ -296,13 +307,16 @@ function recurringIncomeByMonth(
       occurrence = occurrenceAt(schedule.nextDate, schedule.recurrence, index);
     }
     while (occurrence < rangeEnd) {
-      const month = asDateString(occurrence).slice(0, 7);
-      totals.set(month, (totals.get(month) ?? 0) + schedule.amountCents);
+      occurrences.push({
+        month: asDateString(occurrence).slice(0, 7),
+        category: schedule.category,
+        amountCents: schedule.amountCents,
+      });
       index++;
       occurrence = occurrenceAt(schedule.nextDate, schedule.recurrence, index);
     }
   }
-  return totals;
+  return occurrences;
 }
 
 export function recurringIncomeForMonth(db: Database.Database, month: string): number {
@@ -459,10 +473,27 @@ export function saveBudgets(db: Database.Database, budgets: BudgetInput[]): Budg
 export function getBudgetBuilderSummary(db: Database.Database, now = new Date()): BudgetBuilderSummary {
   const start = localDateString(new Date(now.getFullYear(), now.getMonth(), 1));
   const end = localDateString(new Date(now.getFullYear(), now.getMonth() + 1, 1));
-  const incomeCents = (db.prepare(
-    `SELECT COALESCE(SUM(amount_cents), 0) AS total FROM finance_entry
+  const actualIncome = db.prepare(
+    `SELECT amount_cents AS amountCents, category FROM finance_entry
      WHERE kind = 'income' AND entry_date >= ? AND entry_date < ?`,
-  ).get(start, end) as { total: number }).total;
+  ).all(start, end) as Array<{ amountCents: number; category: string }>;
+  const recordedByCategory = new Map<string, number>();
+  const actualIncomeCents = actualIncome.reduce((total, entry) => {
+    const category = entry.category.trim().toLocaleLowerCase();
+    recordedByCategory.set(category, (recordedByCategory.get(category) ?? 0) + 1);
+    return total + entry.amountCents;
+  }, 0);
+  const scheduledIncomeCents = recurringIncomeOccurrencesByMonth(db, [start.slice(0, 7)])
+    .reduce((total, occurrence) => {
+      const category = occurrence.category.trim().toLocaleLowerCase();
+      const recordedCount = recordedByCategory.get(category) ?? 0;
+      if (recordedCount > 0) {
+        // A recorded payment replaces one projected occurrence in the same income category.
+        recordedByCategory.set(category, recordedCount - 1);
+        return total;
+      }
+      return total + occurrence.amountCents;
+    }, 0);
 
   const mortgageCents = (db.prepare(
     `SELECT repayment_cents AS amountCents, repayment_frequency AS frequency
@@ -496,7 +527,7 @@ export function getBudgetBuilderSummary(db: Database.Database, now = new Date())
   }, 0);
 
   return {
-    incomeCents,
+    incomeCents: actualIncomeCents + scheduledIncomeCents,
     fixedCommitmentsCents: mortgageCents + loanCents + billCents + insuranceCents,
     month: start.slice(0, 7),
   };
