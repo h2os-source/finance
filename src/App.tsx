@@ -13,6 +13,8 @@ import {
   CircleHelp,
   Coins,
   CreditCard,
+  ChevronLeft,
+  ChevronRight,
   Download,
   ExternalLink,
   FileChartColumnIncreasing,
@@ -38,9 +40,46 @@ import {
 } from "recharts";
 import { api } from "./api";
 import { partitionSelectedStatementRows } from "../server/src/statementImportReview";
+import {
+  getInsuranceTypeLabel,
+  INSURANCE_FREQUENCY_LABELS,
+  INSURANCE_TYPE_FIELDS,
+  INSURANCE_TYPE_LABELS,
+  INSURANCE_TYPES,
+  getPolicyRenewalStatus,
+  normalizeInsuranceType,
+  sortInsurancePolicies,
+  type InsuranceDetailField,
+  type InsurancePaymentFrequency,
+  type InsuranceType,
+} from "../server/src/insurance";
+import {
+  BUDGET_CATEGORIES,
+  BUDGET_GROUPS,
+  calculateBudgetAllocations,
+  calculateBudgetSummary,
+  getSavingsGoalWarning,
+  monthlyEquivalentCents,
+  type BudgetGroup,
+} from "../server/src/budget";
+import {
+  getCurrentPeriodSelection,
+  getPeriodRange,
+  isCurrentPeriod,
+  isDateInPeriod,
+  isPeriodCurrentOrFuture,
+  navigatePeriod,
+  navigateReportingPage,
+  selectCurrentPeriod,
+  updateReportingPeriod,
+  type PeriodRange,
+  type PeriodSelection,
+  type ReportingPageState,
+} from "../server/src/timePeriods";
 import type {
   AccountType,
   AuthStatus,
+  BudgetBuilderSummary,
   BudgetFrequency,
   BudgetPlan,
   BudgetSourceType,
@@ -55,7 +94,6 @@ import type {
   PlannerItem,
   PlannerItemInput,
   PlannerKind,
-  PolicyType,
   RecurringIncome,
   Recurrence,
   StatementDestination,
@@ -100,6 +138,57 @@ function formatMonth(month: string): string {
   );
 }
 
+function formatPeriodBucket(bucket: string, unit: PeriodSelection["unit"]): string {
+  if (unit === "financialYear") return formatMonth(bucket);
+  return formatDate(bucket, unit === "week"
+    ? { weekday: "short", day: "numeric", month: "short" }
+    : { day: "numeric", month: "short" });
+}
+
+function PeriodSelector({
+  selection,
+  onChange,
+}: {
+  selection: PeriodSelection;
+  onChange: (selection: PeriodSelection) => void;
+}) {
+  const range = getPeriodRange(selection);
+  const current = isCurrentPeriod(selection);
+  return (
+    <div className="period-toolbar">
+      <div aria-label="Reporting period" className="period-unit-tabs" role="group">
+        {([
+          ["week", "Week"],
+          ["month", "Month"],
+          ["financialYear", "Financial Year"],
+        ] as const).map(([unit, label]) => (
+          <button
+            aria-pressed={selection.unit === unit}
+            className={selection.unit === unit ? "selected" : ""}
+            key={unit}
+            onClick={() => onChange({ ...selection, unit })}
+            type="button"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="period-navigation">
+        <button aria-label="Previous period" className="period-arrow" onClick={() => onChange(navigatePeriod(selection, -1))} type="button">
+          <ChevronLeft size={16} />
+        </button>
+        <strong aria-live="polite">{range.label}</strong>
+        <button aria-label="Next period" className="period-arrow" onClick={() => onChange(navigatePeriod(selection, 1))} type="button">
+          <ChevronRight size={16} />
+        </button>
+        <button className="period-current-button" disabled={current} onClick={() => onChange(selectCurrentPeriod(selection))} type="button">
+          Current
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function UpdateControl() {
   const [state, setState] = useState<UpdaterState | null>(null);
   const updater = window.financeUpdater;
@@ -137,7 +226,19 @@ function UpdateControl() {
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [data, setData] = useState<DashboardData | null>(null);
-  const [activePage, setActivePage] = useState("Dashboard");
+  const [pageState, setPageState] = useState<ReportingPageState>(() => ({
+    activePage: "Dashboard",
+    period: getCurrentPeriodSelection(),
+  }));
+  const activePage = pageState.activePage;
+  const periodSelection = pageState.period;
+  const periodRange = getPeriodRange(periodSelection);
+  const setActivePage = (page: string) => setPageState((current) => navigateReportingPage(current, page));
+  const setPeriodSelection = (period: PeriodSelection) => setPageState((current) => updateReportingPeriod(current, period));
+  const [periodReport, setPeriodReport] = useState<FinanceReport | null>(null);
+  const [periodReportError, setPeriodReportError] = useState("");
+  const [periodReportLoading, setPeriodReportLoading] = useState(true);
+  const [periodReportRevision, setPeriodReportRevision] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -154,6 +255,27 @@ export default function App() {
       .finally(() => setLoading(false));
   }, []);
 
+  useEffect(() => {
+    if (!auth?.authenticated) return;
+    let active = true;
+    setPeriodReport(null);
+    setPeriodReportError("");
+    setPeriodReportLoading(true);
+    api.report(periodSelection)
+      .then((report) => {
+        if (active) setPeriodReport(report);
+      })
+      .catch((reason: unknown) => {
+        if (active) setPeriodReportError(reason instanceof Error ? reason.message : "Unable to load period results.");
+      })
+      .finally(() => {
+        if (active) setPeriodReportLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth?.authenticated, periodSelection, periodReportRevision]);
+
   async function handleAuthenticated() {
     const status = await api.authStatus();
     setAuth(status);
@@ -165,6 +287,7 @@ export default function App() {
     setError("");
     try {
       setData(await api.dashboard());
+      setPeriodReportRevision((revision) => revision + 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to load your dashboard.");
     }
@@ -173,11 +296,13 @@ export default function App() {
   async function refreshDashboardData() {
     const updated = await api.dashboard();
     setData(updated);
+    setPeriodReportRevision((revision) => revision + 1);
   }
 
   async function handleRemoveSampleData() {
     const updated = await api.removeSampleData();
     setData(updated);
+    setPeriodReportRevision((revision) => revision + 1);
     setError("");
   }
 
@@ -263,18 +388,24 @@ export default function App() {
           <div className="breadcrumbs"><span>Home</span><span className="crumb-separator">/</span><strong>{activePage}</strong></div>
           <div className="topbar-actions">
             <UpdateControl />
-            <span className="financial-year">FY {data?.financialYear ?? "—"}</span>
             <button className="icon-button" aria-label="Notifications"><Bell size={18} /><i /></button>
             <div className="topbar-divider" />
             <div className="topbar-user">{auth.displayName?.slice(0, 1).toUpperCase()}</div>
           </div>
         </header>
+        {["Dashboard", "Income", "Spending", "Bills", "Reports"].includes(activePage) && (
+          <PeriodSelector selection={periodSelection} onChange={setPeriodSelection} />
+        )}
         {error && data && <div className="app-error" role="alert">{error}</div>}
+        {periodReportError && <div className="app-error" role="alert">{periodReportError}</div>}
 
         {activePage === "Dashboard" ? data ? (
           <Dashboard
             data={data}
             displayName={auth.displayName ?? "there"}
+            periodRange={periodRange}
+            report={periodReport}
+            reportLoading={periodReportLoading}
             onNavigate={setActivePage}
           />
         ) : (
@@ -329,19 +460,22 @@ export default function App() {
             });
           }} />
         ) : activePage === "Income" || activePage === "Spending" ? (
-          <EntriesPage key={activePage} kind={activePage === "Income" ? "income" : "spending"} onChanged={refreshDashboardData} />
+          <EntriesPage key={activePage} kind={activePage === "Income" ? "income" : "spending"} periodRange={periodRange} onChanged={refreshDashboardData} />
         ) : activePage === "Bills" || activePage === "Insurance" ? (
-          <PlannerPage key={activePage} kind={activePage === "Bills" ? "bill" : "insurance"} onChanged={refreshDashboardData} />
+          <PlannerPage key={activePage} kind={activePage === "Bills" ? "bill" : "insurance"} periodRange={periodRange} onChanged={refreshDashboardData} />
         ) : activePage === "Budgets" ? (
           <BudgetsPage onChanged={refreshDashboardData} />
         ) : activePage === "Reports" ? (
-          <ReportsPage />
+          <ReportsPage periodRange={periodRange} report={periodReport} loading={periodReportLoading} error={periodReportError} />
         ) : (
           activePage === "Settings" ? (
           <SettingsPage
             displayName={auth.displayName ?? ""}
             onLogout={handleLogout}
-            onRestored={setData}
+            onRestored={(restored) => {
+              setData(restored);
+              setPeriodReportRevision((revision) => revision + 1);
+            }}
           />
           ) : (
             <ComingSoonPage page={activePage} onDashboard={() => setActivePage("Dashboard")} />
@@ -448,17 +582,29 @@ function AuthGate({
 function Dashboard({
   data,
   displayName,
+  periodRange,
+  report,
+  reportLoading,
   onNavigate,
 }: {
   data: DashboardData;
   displayName: string;
+  periodRange: PeriodRange;
+  report: FinanceReport | null;
+  reportLoading: boolean;
   onNavigate: (page: string) => void;
 }) {
   const firstName = displayName.split(/\s+/)[0] || "there";
   const currentHour = new Date().getHours();
   const salutation = currentHour < 12 ? "Good morning" : currentHour < 17 ? "Good afternoon" : "Good evening";
   const dateLabel = new Intl.DateTimeFormat("en-AU", { weekday: "long", day: "numeric", month: "long" }).format(new Date());
-  const latestMonth = data.spendingHistory.at(-1);
+  const reportIncome = report?.incomeCents ?? 0;
+  const reportSpending = report?.spendingCents ?? 0;
+  const reportBillsPaid = report?.billsPaidCents ?? 0;
+  const reportOutgoings = report?.totalOutgoingsCents ?? 0;
+  const reportNet = report?.netCashFlowCents ?? 0;
+  const upcomingItems = report?.upcomingItems ?? [];
+  const showUpcoming = isPeriodCurrentOrFuture(periodRange);
   const hasPersonalData = data.personalDataPresent;
 
   if (!data.sampleDataPresent && !hasPersonalData) {
@@ -518,14 +664,17 @@ function Dashboard({
         </div>
       </section>
 
-      <section className="metric-grid" aria-label="Monthly summary">
+      <section className="metric-grid" aria-label="Selected period financial results">
         <MetricCard icon={Wallet} title="Cash & offset" amount={data.cashCents} note={`Offset ${formatMoney(data.offsetCents)}`} tone="mint" />
         <MetricCard icon={PiggyBank} title="Super" amount={data.superCents} note="Combined household" tone="lavender" />
         <MetricCard icon={House} title="Mortgage" amount={data.mortgageCents} note={`${data.sampleDataPresent && data.mortgageIsMock ? "Sample loan" : data.mortgageIsMock ? "No loan entered" : "ME home loan"} · Effective ${formatMoney(data.mortgageCents - data.offsetCents)}`} tone="peach" />
-        <MetricCard icon={Banknote} title="Income" amount={data.monthlyIncomeCents} note="This month" tone="blue" />
-        <MetricCard icon={CreditCard} title="Spending" amount={data.monthlySpendingCents} note="This month" tone="rose" />
-        <MetricCard icon={ChartNoAxesCombined} title="Surplus" amount={data.monthlySurplusCents} note="This month" tone="mint" />
+        <MetricCard icon={Banknote} title="Income" amount={reportIncome} note={periodRange.label} tone="blue" />
+        <MetricCard icon={CreditCard} title="Spending" amount={reportSpending} note={periodRange.label} tone="rose" />
+        <MetricCard icon={CalendarDays} title="Bills paid" amount={reportBillsPaid} note={periodRange.label} tone="peach" />
+        <MetricCard icon={ArrowUpRight} title="Total outgoings" amount={reportOutgoings} note="Spending + bills paid" tone="rose" />
+        <MetricCard icon={ChartNoAxesCombined} title="Net cash flow" amount={reportNet} note="Income - outgoings" tone="mint" />
       </section>
+      {reportLoading && <p className="period-report-loading">Loading {periodRange.label} results...</p>}
 
       {data.propertyCoverage.length > 0 && <section className="panel property-coverage-panel">
         <div className="panel-heading"><div><h2>Home insurance check</h2><p>Building cover compared with your entered property value. Rebuild costs and policy limits may differ.</p></div></div>
@@ -558,45 +707,46 @@ function Dashboard({
       <section className="content-grid">
         <div className="panel trend-panel">
           <div className="panel-heading">
-            <div><h2>Income &amp; spending</h2><p>Your monthly household cash flow</p></div>
-            <button className="subtle-select">Last 6 months <ChevronDown size={14} /></button>
+            <div><h2>Cash flow</h2><p>Actual dated results for {periodRange.label}</p></div>
           </div>
-          <div className="chart-legend"><span><i className="chart-dot income-dot" /> Income</span><span><i className="chart-dot spending-dot" /> Spending</span></div>
+          <div className="chart-legend"><span><i className="chart-dot income-dot" /> Income</span><span><i className="chart-dot spending-dot" /> Spending</span><span><i className="chart-dot bills-dot" /> Bills paid</span></div>
           <div className="chart-wrap">
-            {data.spendingHistory.length === 0 ? (
-              <div className="dashboard-section-empty">No income or spending data entered yet.</div>
+            {!report?.hasActivity ? (
+              <div className="dashboard-section-empty">{reportLoading ? "Loading period results..." : "No income, spending or paid bills in this period."}</div>
             ) : (
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data.spendingHistory.slice(-6)} margin={{ top: 12, right: 5, bottom: 0, left: -12 }}>
+              <AreaChart data={report.series} margin={{ top: 12, right: 5, bottom: 0, left: -12 }}>
                 <defs>
                   <linearGradient id="incomeFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#5d87e8" stopOpacity={0.18} /><stop offset="95%" stopColor="#5d87e8" stopOpacity={0} /></linearGradient>
                   <linearGradient id="spendingFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#c4b5fd" stopOpacity={0.22} /><stop offset="95%" stopColor="#c4b5fd" stopOpacity={0} /></linearGradient>
+                  <linearGradient id="billsFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f1b85a" stopOpacity={0.18} /><stop offset="95%" stopColor="#f1b85a" stopOpacity={0} /></linearGradient>
                 </defs>
                 <CartesianGrid stroke="#edf0f4" vertical={false} />
-                <XAxis dataKey="month" tickFormatter={formatMonth} axisLine={false} tickLine={false} tick={{ fill: "#929baa", fontSize: 12 }} dy={10} />
+                <XAxis dataKey="bucket" tickFormatter={(bucket: string) => formatPeriodBucket(bucket, periodRange.unit)} axisLine={false} tickLine={false} tick={{ fill: "#929baa", fontSize: 12 }} dy={10} />
                 <YAxis tickFormatter={(value: number) => `$${(value / 100000).toFixed(1)}k`} axisLine={false} tickLine={false} tick={{ fill: "#929baa", fontSize: 11 }} />
-                <Tooltip content={<ChartTooltip />} />
+                <Tooltip content={<ChartTooltip periodUnit={periodRange.unit} />} />
                 <Area type="monotone" dataKey="incomeCents" name="Income" stroke="#5d87e8" strokeWidth={2.5} fill="url(#incomeFill)" />
                 <Area type="monotone" dataKey="spendingCents" name="Spending" stroke="#a78bfa" strokeWidth={2.5} fill="url(#spendingFill)" />
+                <Area type="monotone" dataKey="billsPaidCents" name="Bills paid" stroke="#e1a843" strokeWidth={2.5} fill="url(#billsFill)" />
               </AreaChart>
             </ResponsiveContainer>
             )}
           </div>
-          {data.spendingHistory.length > 0 && <div className="chart-summary">
-            <div><span>Income this month</span><strong>{formatMoney(latestMonth?.incomeCents ?? data.monthlyIncomeCents)}</strong></div>
-            <div><span>Spent this month</span><strong>{formatMoney(latestMonth?.spendingCents ?? data.monthlySpendingCents)}</strong></div>
-            <div><span>Monthly surplus</span><strong className="positive">{formatMoney(data.monthlySurplusCents)}</strong></div>
+          {report?.hasActivity && <div className="chart-summary">
+            <div><span>Income</span><strong>{formatMoney(reportIncome)}</strong></div>
+            <div><span>Spending</span><strong>{formatMoney(reportSpending)}</strong></div>
+            <div><span>Bills paid</span><strong>{formatMoney(reportBillsPaid)}</strong></div>
           </div>}
         </div>
 
-        <div className="panel upcoming-panel">
+        {showUpcoming && <div className="panel upcoming-panel">
           <div className="panel-heading">
-            <div><h2>Coming up</h2><p>Bills &amp; renewals to keep an eye on</p></div>
+            <div><h2>Upcoming</h2><p>Due in {periodRange.label} · Bills total {formatMoney(report?.upcomingBillsCents ?? 0)}</p></div>
             <button className="circle-action" aria-label="View all upcoming items"><ArrowRight size={16} /></button>
           </div>
           <div className="upcoming-list">
-            {data.upcoming.length === 0 && <div className="dashboard-section-empty">No upcoming bills or renewals entered.</div>}
-            {data.upcoming.map((item) => (
+            {upcomingItems.length === 0 && <div className="dashboard-section-empty">No upcoming bills or renewals in this period.</div>}
+            {upcomingItems.map((item) => (
               <div className="upcoming-item" key={item.id}>
                 <div className={`upcoming-icon ${item.kind}`} aria-hidden="true">{item.kind === "bill" ? <CalendarDays size={17} /> : <ShieldCheck size={17} />}</div>
                 <div className="upcoming-details"><strong>{item.title}</strong><span>{item.kind === "bill" ? "Bill" : "Insurance renewal"} <i /> {formatDate(item.dueDate)}</span></div>
@@ -605,7 +755,7 @@ function Dashboard({
             ))}
           </div>
           <button className="text-link">View all upcoming <ArrowRight size={14} /></button>
-        </div>
+        </div>}
       </section>
 
       <section className="content-grid lower-grid">
@@ -629,16 +779,16 @@ function Dashboard({
         </div>
         <div className="panel snapshot-panel">
           <div className="panel-heading">
-            <div><h2>This month at a glance</h2><p>A quick check on your financial rhythm</p></div>
+            <div><h2>{periodRange.label} at a glance</h2><p>Actual income and outgoings</p></div>
           </div>
           <div className="snapshot-list">
-            <div><span className="snapshot-icon income-snapshot"><ArrowDownRight size={16} /></span><span className="snapshot-label">Household income</span><strong>{formatMoney(data.monthlyIncomeCents)}</strong></div>
-            <div><span className="snapshot-icon spending-snapshot"><ArrowUpRight size={16} /></span><span className="snapshot-label">Household spending</span><strong>{formatMoney(data.monthlySpendingCents)}</strong></div>
-            <div><span className="snapshot-icon surplus-snapshot"><Check size={16} /></span><span className="snapshot-label">Left over</span><strong className="positive">{formatMoney(data.monthlySurplusCents)}</strong></div>
+            <div><span className="snapshot-icon income-snapshot"><ArrowDownRight size={16} /></span><span className="snapshot-label">Income</span><strong>{formatMoney(reportIncome)}</strong></div>
+            <div><span className="snapshot-icon spending-snapshot"><ArrowUpRight size={16} /></span><span className="snapshot-label">Total outgoings</span><strong>{formatMoney(reportOutgoings)}</strong></div>
+            <div><span className="snapshot-icon surplus-snapshot"><Check size={16} /></span><span className="snapshot-label">Net cash flow</span><strong className={reportNet >= 0 ? "positive" : ""}>{formatMoney(reportNet)}</strong></div>
           </div>
-          {data.spendingHistory.length > 0 && data.monthlyIncomeCents > 0
-            ? <div className="snapshot-note"><span className="note-sparkle">✦</span><span>You kept <strong>{Math.round((data.monthlySurplusCents / data.monthlyIncomeCents) * 100)}%</strong> of household income this month.</span></div>
-            : <div className="dashboard-section-empty snapshot-empty">No monthly income or spending entered yet.</div>}
+          {report?.hasActivity && reportIncome > 0
+            ? <div className="snapshot-note"><span className="note-sparkle">✦</span><span>Net cash flow is <strong>{Math.round((reportNet / reportIncome) * 100)}%</strong> of recorded income for this period.</span></div>
+            : <div className="dashboard-section-empty snapshot-empty">{reportLoading ? "Loading period results..." : "No actual income or outgoings in this period."}</div>}
         </div>
       </section>
 
@@ -673,15 +823,17 @@ function ChartTooltip({
   active,
   payload,
   label,
+  periodUnit,
 }: {
   active?: boolean;
   payload?: Array<{ name: string; value: number; color: string }>;
   label?: string;
+  periodUnit: PeriodSelection["unit"];
 }) {
   if (!active || !payload?.length) return null;
   return (
     <div className="chart-tooltip">
-      <strong>{label ? formatMonth(label) : ""}</strong>
+      <strong>{label ? formatPeriodBucket(label, periodUnit) : ""}</strong>
       {payload.map((item) => <span key={item.name}><i style={{ backgroundColor: item.color }} />{item.name}<b>{formatMoney(item.value)}</b></span>)}
     </div>
   );
@@ -1272,10 +1424,9 @@ function StatementImport({ onImported }: { onImported: () => Promise<void> }) {
   );
 }
 
-function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChanged: () => Promise<void> }) {
+function EntriesPage({ kind, periodRange, onChanged }: { kind: "income" | "spending"; periodRange: PeriodRange; onChanged: () => Promise<void> }) {
   const [entries, setEntries] = useState<FinanceEntry[]>([]);
   const [recurringItems, setRecurringItems] = useState<RecurringIncome[]>([]);
-  const [report, setReport] = useState<FinanceReport | null>(null);
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
@@ -1295,9 +1446,8 @@ function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChang
     const list = await api.entries(kind);
     setEntries(list);
     if (kind === "income") {
-      const [schedules, currentReport] = await Promise.all([api.recurringIncome(), api.report()]);
+      const schedules = await api.recurringIncome();
       setRecurringItems(schedules);
-      setReport(currentReport);
     }
   }
 
@@ -1426,12 +1576,8 @@ function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChang
     setMessage("");
   }
 
-  const monthTotal = entries
-    .filter((entry) => entry.entryDate.slice(0, 7) === todayInputDate().slice(0, 7))
-    .reduce((total, entry) => total + entry.amountCents, 0) +
-    (kind === "income" ? (report?.incomeCents ?? 0) - entries
-      .filter((entry) => entry.entryDate.slice(0, 7) === todayInputDate().slice(0, 7))
-      .reduce((total, entry) => total + entry.amountCents, 0) : 0);
+  const periodEntries = entries.filter((entry) => isDateInPeriod(entry.entryDate, periodRange));
+  const periodTotal = periodEntries.reduce((total, entry) => total + entry.amountCents, 0);
 
   return (
     <div className="secondary-page">
@@ -1439,7 +1585,7 @@ function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChang
         <div><div className="eyebrow">YOUR HOUSEHOLD CASH FLOW</div><h1>{pageTitle}</h1><p className="welcome-subtitle">Enter dated transactions to build your monthly totals, dashboard charts and reports.</p></div>
         <span className="demo-badge no-sample-badge"><span /> YOUR DATA</span>
       </div>
-      <div className="finance-summary-strip"><span>{pageTitle} this month</span><strong>{formatMoney(monthTotal)}</strong><span>{entries.length} saved {entries.length === 1 ? "entry" : "entries"}{kind === "income" && recurringItems.length > 0 ? " · includes expected recurring income" : ""}</span></div>
+      <div className="finance-summary-strip"><span>{pageTitle} · {periodRange.label}</span><strong>{formatMoney(periodTotal)}</strong><span>{periodEntries.length} {periodEntries.length === 1 ? "entry" : "entries"} in period · {entries.length} saved total</span></div>
       <section className="panel finance-entry-panel">
         <div className="panel-heading"><div><h2>{editingId === null ? `Add ${kind} entry` : `Edit ${kind} entry`}</h2><p>Entries are for reports and charts only; they do not change account balances.</p></div></div>
         <form className="finance-entry-form" onSubmit={submit}>
@@ -1466,18 +1612,18 @@ function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChang
       {kind === "spending" && <StatementImport onImported={async () => { await loadEntries(); await onChanged(); }} />}
       <section className="panel finance-list-panel">
         <div className="panel-heading">
-          <div><h2>Entries</h2><p>Most recent first.</p></div>
+          <div><h2>Entries</h2><p>Most recent first · {periodRange.label}</p></div>
           {kind === "spending" && (
             <button className="account-delete-button spending-delete-all-button" disabled={loading || deletingAllSpending || entries.length === 0} onClick={() => void removeAllSpendingEntries()} type="button">
               {deletingAllSpending ? "Deleting…" : "Delete all"}
             </button>
           )}
         </div>
-        {loading ? <p className="mortgage-status">Loading entries…</p> : entries.length === 0 ? (
-          <p className="dashboard-section-empty">No {kind} entries yet. Add one above to populate charts and reports.</p>
+        {loading ? <p className="mortgage-status">Loading entries…</p> : periodEntries.length === 0 ? (
+          <p className="dashboard-section-empty">No {kind} entries in {periodRange.label}.</p>
         ) : (
           <div className="finance-entry-list">
-            {entries.map((entry) => (
+            {periodEntries.map((entry) => (
               <article className="finance-entry-row" key={entry.id}>
                 <div className="finance-entry-date">{formatDate(entry.entryDate, { year: "numeric" })}</div>
                 <div className="finance-entry-details"><strong>{entry.category}</strong>{entry.description && <span>{entry.description}</span>}</div>
@@ -1491,7 +1637,7 @@ function EntriesPage({ kind, onChanged }: { kind: "income" | "spending"; onChang
       </section>
       {kind === "income" && (
         <section className="panel finance-list-panel">
-          <div className="panel-heading"><div><h2>Recurring income</h2><p>Expected income is included in this month’s dashboard totals and reports.</p></div></div>
+          <div className="panel-heading"><div><h2>Recurring income</h2><p>Schedules are shown separately; only dated Income entries count in period results.</p></div></div>
           {loading ? <p className="mortgage-status">Loading recurring income…</p> : recurringItems.length === 0 ? (
             <p className="dashboard-section-empty">No recurring income schedules yet. Choose “This is recurring income” when adding regular pay or another expected payment.</p>
           ) : (
@@ -1518,19 +1664,41 @@ interface PlannerDraft {
   amount: string;
   dueDate: string;
   recurrence: Recurrence;
+  paymentFrequency: InsurancePaymentFrequency;
   notes: string;
   propertyName: string;
   insuredAmount: string;
-  policyType: PolicyType;
+  contentsCoverAmount: string;
+  policyType: InsuranceType;
+  policyNumber: string;
+  renewalDate: string;
+  vehicle: string;
+  coverBasis: string;
+  policyLevel: string;
+  coveredPeople: string;
+  petName: string;
+  coverLevel: string;
+  tripDestination: string;
+  coverageStartDate: string;
+  coverageEndDate: string;
+  insuredPerson: string;
+  waitingPeriod: string;
+  benefitPeriod: string;
+  otherDescription: string;
 }
-
-const policyTypeLabels: Record<PolicyType, string> = { home: "Home", income: "Income protection", life: "Life" };
 
 function emptyPlannerDraft(kind: PlannerKind): PlannerDraft {
-  return { kind, name: "", provider: "", amount: "", dueDate: todayInputDate(), recurrence: "none", notes: "", propertyName: "Home", insuredAmount: "", policyType: "home" };
+  return {
+    kind, name: "", provider: "", amount: "", dueDate: todayInputDate(), recurrence: "none",
+    paymentFrequency: "monthly", notes: "", propertyName: "", insuredAmount: "", contentsCoverAmount: "",
+    policyType: "home", policyNumber: "", renewalDate: "", vehicle: "", coverBasis: "",
+    policyLevel: "", coveredPeople: "", petName: "", coverLevel: "", tripDestination: "",
+    coverageStartDate: "", coverageEndDate: "", insuredPerson: "", waitingPeriod: "",
+    benefitPeriod: "", otherDescription: "",
+  };
 }
 
-function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => Promise<void> }) {
+function PlannerPage({ kind, periodRange, onChanged }: { kind: PlannerKind; periodRange: PeriodRange; onChanged: () => Promise<void> }) {
   const [allItems, setItems] = useState<PlannerItem[]>([]);
   const [draft, setDraft] = useState<PlannerDraft>(() => emptyPlannerDraft(kind));
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -1543,6 +1711,7 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
   const [message, setMessage] = useState("");
   const pageTitle = kind === "bill" ? "Bills" : "Insurance";
   const title = kind === "bill" ? billTab === "upcoming" ? "Upcoming bills" : "Paid bills" : pageTitle;
+  const selectedStatusItems = allItems.filter((item) => (item.status ?? "upcoming") === billTab);
 
   async function loadItems() {
     setItems(await api.plannerItems(kind));
@@ -1568,6 +1737,11 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
       ...draft,
       amountCents: Math.round(Number(draft.amount) * 100),
       insuredValueCents: kind === "insurance" ? Math.round(Number(draft.insuredAmount) * 100) : 0,
+      contentsCoverCents: kind === "insurance" ? Math.round(Number(draft.contentsCoverAmount) * 100) : 0,
+      recurrence: kind === "insurance"
+        ? draft.paymentFrequency === "one-off" ? "none" : draft.paymentFrequency === "half-yearly" ? "yearly" : draft.paymentFrequency
+        : draft.recurrence,
+      paymentFrequency: kind === "insurance" ? draft.paymentFrequency : undefined,
     };
     try {
       if (editingId === null) await api.createPlannerItem(payload);
@@ -1614,11 +1788,11 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
   }
 
   async function deleteAllBillsInTab() {
-    if (kind !== "bill" || items.length === 0) return;
+    if (kind !== "bill" || selectedStatusItems.length === 0) return;
     const singularLabel = billTab === "paid" ? "paid bill" : "upcoming bill";
     const pluralLabel = `${singularLabel}s`;
-    const selectedLabel = items.length === 1 ? singularLabel : pluralLabel;
-    if (!window.confirm(`Delete all ${items.length} ${selectedLabel}? This cannot be undone.`)) return;
+    const selectedLabel = selectedStatusItems.length === 1 ? singularLabel : pluralLabel;
+    if (!window.confirm(`Delete all ${selectedStatusItems.length} ${selectedLabel}? This cannot be undone.`)) return;
     setError("");
     setMessage("");
     setDeletingAllBills(true);
@@ -1626,7 +1800,7 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
       const { deleted } = await api.deletePlannerItemsByStatus(billTab);
       await loadItems();
       await onChanged();
-      if (editingId !== null && items.some((item) => item.id === editingId)) resetForm();
+      if (editingId !== null && selectedStatusItems.some((item) => item.id === editingId)) resetForm();
       setMessage(`${deleted} ${deleted === 1 ? singularLabel : pluralLabel} deleted.`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : `Unable to delete ${pluralLabel}.`);
@@ -1644,44 +1818,175 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
       amount: (item.amountCents / 100).toFixed(2),
       dueDate: item.status === "paid" ? item.dueDate : item.nextDueDate,
       recurrence: item.recurrence,
+      paymentFrequency: item.paymentFrequency || (item.recurrence === "none" ? "one-off" : item.recurrence),
       notes: item.notes,
       propertyName: item.propertyName,
       insuredAmount: item.insuredValueCents ? (item.insuredValueCents / 100).toFixed(2) : "",
-      policyType: item.policyType,
+      contentsCoverAmount: item.contentsCoverCents ? (item.contentsCoverCents / 100).toFixed(2) : "",
+      policyType: normalizeInsuranceType(item.policyType),
+      policyNumber: item.policyNumber,
+      renewalDate: item.renewalDate,
+      vehicle: item.vehicle,
+      coverBasis: item.coverBasis,
+      policyLevel: item.policyLevel,
+      coveredPeople: item.coveredPeople,
+      petName: item.petName,
+      coverLevel: item.coverLevel,
+      tripDestination: item.tripDestination,
+      coverageStartDate: item.coverageStartDate,
+      coverageEndDate: item.coverageEndDate,
+      insuredPerson: item.insuredPerson,
+      waitingPeriod: item.waitingPeriod,
+      benefitPeriod: item.benefitPeriod,
+      otherDescription: item.otherDescription,
     });
   }
 
+  function renderInsuranceField(field: InsuranceDetailField) {
+    const textField = (
+      label: string,
+      key: keyof PlannerDraft,
+      maxLength: number,
+      required = false,
+    ) => (
+      <label key={field}>{label}<input maxLength={maxLength} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} required={required} value={String(draft[key])} /></label>
+    );
+    const moneyField = (label: string, key: "insuredAmount" | "contentsCoverAmount", required = false) => (
+      <label key={field}>{label}<span className="money-input"><span>$</span><input inputMode="decimal" max="1000000000" min="0" onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} required={required} step="0.01" type="number" value={draft[key]} /></span></label>
+    );
+    const dateField = (label: string, key: "coverageStartDate" | "coverageEndDate") => (
+      <label key={field}>{label}<input onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} type="date" value={draft[key]} /></label>
+    );
+
+    switch (field) {
+      case "propertyName": return textField("Property or home", "propertyName", 80, draft.policyType === "home");
+      case "buildingCover": return moneyField("Building cover amount (AUD)", "insuredAmount", draft.policyType === "home");
+      case "contentsCover": return moneyField("Contents cover amount (AUD)", "contentsCoverAmount");
+      case "vehicle": return textField("Vehicle", "vehicle", 100);
+      case "coverBasis":
+        return (
+          <label key={field}>Cover basis<select onChange={(event) => setDraft((current) => ({ ...current, coverBasis: event.target.value }))} value={draft.coverBasis}>
+            <option value="">Select cover basis</option><option value="agreed">Agreed value</option><option value="market">Market value</option>
+          </select></label>
+        );
+      case "insuredValue":
+        return moneyField(
+          draft.policyType === "car" ? "Insured/agreed value (AUD)" : draft.policyType === "life" ? "Cover amount (AUD)" : "Insured value (AUD, optional)",
+          "insuredAmount",
+        );
+      case "policyLevel": return textField("Policy or cover level", "policyLevel", 100);
+      case "coveredPeople": return textField("Covered people or household", "coveredPeople", 200);
+      case "petName": return textField("Pet name", "petName", 100);
+      case "coverLevel": return textField("Cover level", "coverLevel", 100);
+      case "tripDestination": return textField("Trip or destination", "tripDestination", 150);
+      case "coverageStartDate": return dateField("Coverage start date", "coverageStartDate");
+      case "coverageEndDate": return dateField("Coverage end date", "coverageEndDate");
+      case "insuredPerson": return textField("Insured person", "insuredPerson", 100);
+      case "monthlyBenefit": return moneyField("Monthly benefit (AUD)", "insuredAmount");
+      case "waitingPeriod": return textField("Waiting period", "waitingPeriod", 80);
+      case "benefitPeriod": return textField("Benefit period", "benefitPeriod", 80);
+      case "description": return textField("Description", "otherDescription", 300);
+    }
+  }
+
+  function getPolicyDetails(item: PlannerItem): Array<{ label: string; value: string }> {
+    const type = normalizeInsuranceType(item.policyType);
+    const values: Partial<Record<InsuranceDetailField, string>> = {
+      propertyName: item.propertyName,
+      buildingCover: item.insuredValueCents > 0 ? formatMoney(item.insuredValueCents) : "",
+      contentsCover: item.contentsCoverCents > 0 ? formatMoney(item.contentsCoverCents) : "",
+      vehicle: item.vehicle,
+      coverBasis: item.coverBasis === "agreed" || item.coverBasis === "agreed value"
+        ? "Agreed value"
+        : item.coverBasis === "market" || item.coverBasis === "market value" ? "Market value" : "",
+      insuredValue: item.insuredValueCents > 0 ? formatMoney(item.insuredValueCents) : "",
+      policyLevel: item.policyLevel,
+      coveredPeople: item.coveredPeople,
+      petName: item.petName,
+      coverLevel: item.coverLevel,
+      tripDestination: item.tripDestination,
+      coverageStartDate: item.coverageStartDate ? formatDate(item.coverageStartDate, { year: "numeric" }) : "",
+      coverageEndDate: item.coverageEndDate ? formatDate(item.coverageEndDate, { year: "numeric" }) : "",
+      insuredPerson: item.insuredPerson,
+      monthlyBenefit: item.insuredValueCents > 0 ? formatMoney(item.insuredValueCents) : "",
+      waitingPeriod: item.waitingPeriod,
+      benefitPeriod: item.benefitPeriod,
+      description: item.otherDescription,
+    };
+    const labels: Record<InsuranceDetailField, string> = {
+      propertyName: "Property or home",
+      buildingCover: "Building cover",
+      contentsCover: "Contents cover",
+      vehicle: "Vehicle",
+      coverBasis: "Cover basis",
+      insuredValue: type === "car" ? "Insured/agreed value" : type === "life" ? "Cover amount" : "Insured value",
+      policyLevel: "Policy or cover level",
+      coveredPeople: "Covered people",
+      petName: "Pet",
+      coverLevel: "Cover level",
+      tripDestination: "Trip or destination",
+      coverageStartDate: "Coverage start",
+      coverageEndDate: "Coverage end",
+      insuredPerson: "Insured person",
+      monthlyBenefit: "Monthly benefit",
+      waitingPeriod: "Waiting period",
+      benefitPeriod: "Benefit period",
+      description: "Description",
+    };
+    return INSURANCE_TYPE_FIELDS[type]
+      .map((field) => ({ label: labels[field], value: values[field] ?? "" }))
+      .filter(({ value }) => value !== "");
+  }
+
+  const today = todayInputDate();
+  const upcomingItemsInPeriod = allItems.filter((item) =>
+    item.kind === "bill" &&
+    (item.status ?? "upcoming") === "upcoming" &&
+    isPeriodCurrentOrFuture(periodRange, today) &&
+    isDateInPeriod(item.nextDueDate, periodRange),
+  );
   const items = kind === "bill"
     ? allItems
-      .filter((item) => (item.status ?? "upcoming") === billTab)
+      .filter((item) => {
+        if ((item.status ?? "upcoming") !== billTab) return false;
+        const date = billTab === "paid" ? item.paidDate : item.nextDueDate;
+        if (!date) return false;
+        return billTab === "paid"
+          ? isDateInPeriod(date, periodRange)
+          : isPeriodCurrentOrFuture(periodRange, today) && isDateInPeriod(date, periodRange);
+      })
       .sort((left, right) => billTab === "paid"
         ? (right.paidDate ?? right.dueDate).localeCompare(left.paidDate ?? left.dueDate)
         : left.nextDueDate.localeCompare(right.nextDueDate))
-    : allItems;
+    : sortInsurancePolicies(allItems);
+  const upcomingTotalCents = upcomingItemsInPeriod.reduce((total, item) => total + item.amountCents, 0);
 
   return (
     <div className="secondary-page">
-      <div className="welcome-row"><div><div className="eyebrow">UPCOMING HOUSEHOLD COSTS</div><h1>{pageTitle}</h1><p className="welcome-subtitle">Track one-off or recurring {pageTitle.toLowerCase()} and their next due dates.</p></div></div>
+      <div className="welcome-row"><div><div className="eyebrow">{kind === "insurance" ? "POLICY REGISTER" : "UPCOMING HOUSEHOLD COSTS"}</div><h1>{pageTitle}</h1><p className="welcome-subtitle">{kind === "insurance" ? "Keep policy details and renewal dates together." : `Track one-off or recurring ${pageTitle.toLowerCase()} and their next due dates.`}</p></div></div>
+      {kind === "bill" && isPeriodCurrentOrFuture(periodRange) && <div className="finance-summary-strip"><span>Upcoming Bills · {periodRange.label}</span><strong>{formatMoney(upcomingTotalCents)}</strong><span>Planned only · excluded from actual outgoings</span></div>}
       <section className="panel finance-entry-panel">
-        <div className="panel-heading"><div><h2>{editingId === null ? `Add ${kind === "bill" ? "bill" : "insurance policy"}` : `Edit ${kind === "bill" ? "bill" : "insurance policy"}`}</h2><p>Recurring items calculate the next due date from the date you enter.</p></div></div>
+        <div className="panel-heading"><div><h2>{editingId === null ? `Add ${kind === "bill" ? "bill" : "insurance policy"}` : `Edit ${kind === "bill" ? "bill" : "insurance policy"}`}</h2><p>{kind === "insurance" ? "Keep payment timing separate from the policy renewal date." : "Recurring items calculate the next due date from the date you enter."}</p></div></div>
         <form className="finance-entry-form" onSubmit={submit}>
-          <label>Name<input maxLength={100} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} placeholder={kind === "bill" ? "e.g. Electricity" : "e.g. Home insurance"} required value={draft.name} /></label>
-          <label>{kind === "bill" ? "Provider (optional)" : "Insurer"}<input maxLength={100} onChange={(event) => setDraft((current) => ({ ...current, provider: event.target.value }))} value={draft.provider} /></label>
-          <label>{kind === "bill" ? "Amount (AUD)" : "What you pay each time (AUD)"}<span className="money-input"><span>$</span><input inputMode="decimal" max="1000000000" min="0.01" onChange={(event) => setDraft((current) => ({ ...current, amount: event.target.value }))} required step="0.01" type="number" value={draft.amount} /></span></label>
+          <label>{kind === "insurance" ? "Policy name" : "Name"}<input maxLength={100} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} placeholder={kind === "bill" ? "e.g. Electricity" : "e.g. Home insurance"} required value={draft.name} /></label>
+          <label>{kind === "bill" ? "Provider (optional)" : "Insurer"}<input maxLength={100} onChange={(event) => setDraft((current) => ({ ...current, provider: event.target.value }))} required={kind === "insurance"} value={draft.provider} /></label>
+          <label>{kind === "bill" ? "Amount (AUD)" : "Premium amount (AUD)"}<span className="money-input"><span>$</span><input inputMode="decimal" max="1000000000" min={kind === "insurance" ? "0" : "0.01"} onChange={(event) => setDraft((current) => ({ ...current, amount: event.target.value }))} required step="0.01" type="number" value={draft.amount} /></span></label>
           {kind === "insurance" && <>
-            <label>Type of insurance<select onChange={(event) => setDraft((current) => ({ ...current, policyType: event.target.value as PolicyType }))} value={draft.policyType}>
-              <option value="home">Home</option><option value="income">Income protection</option><option value="life">Life</option>
+            <label>Type of insurance<select onChange={(event) => setDraft((current) => ({ ...current, policyType: event.target.value as InsuranceType }))} required value={draft.policyType}>
+              {INSURANCE_TYPES.map((type) => <option key={type} value={type}>{INSURANCE_TYPE_LABELS[type]}</option>)}
             </select></label>
-            {draft.policyType === "home" ? <>
-            <label>Property or home<input maxLength={80} onChange={(event) => setDraft((current) => ({ ...current, propertyName: event.target.value }))} placeholder="e.g. 12 Smith Street" required value={draft.propertyName} /></label>
-            <label>Building cover: what it's insured for (AUD)<span className="money-input"><span>$</span><input inputMode="decimal" max="1000000000" min="0.01" onChange={(event) => setDraft((current) => ({ ...current, insuredAmount: event.target.value }))} required step="0.01" type="number" value={draft.insuredAmount} /></span></label>
-            </> :
-            <label>{draft.policyType === "life" ? "Payout if you die (AUD, optional)" : "Payout per month if you can't work (AUD, optional)"}<span className="money-input"><span>$</span><input inputMode="decimal" max="1000000000" min="0" onChange={(event) => setDraft((current) => ({ ...current, insuredAmount: event.target.value }))} step="0.01" type="number" value={draft.insuredAmount} /></span></label>}
+            <label>Policy number (optional)<input maxLength={100} onChange={(event) => setDraft((current) => ({ ...current, policyNumber: event.target.value }))} value={draft.policyNumber} /></label>
+            {INSURANCE_TYPE_FIELDS[draft.policyType].map(renderInsuranceField)}
           </>}
-          <label>Next due date<input onChange={(event) => setDraft((current) => ({ ...current, dueDate: event.target.value }))} required type="date" value={draft.dueDate} /></label>
-          <label>Recurrence<select onChange={(event) => setDraft((current) => ({ ...current, recurrence: event.target.value as Recurrence }))} value={draft.recurrence}>
+          <label>{kind === "insurance" ? "Next payment date" : "Next due date"}<input onChange={(event) => setDraft((current) => ({ ...current, dueDate: event.target.value }))} required type="date" value={draft.dueDate} /></label>
+          {kind === "insurance" ? <>
+            <label>Payment frequency<select onChange={(event) => setDraft((current) => ({ ...current, paymentFrequency: event.target.value as InsurancePaymentFrequency }))} value={draft.paymentFrequency}>
+              {Object.entries(INSURANCE_FREQUENCY_LABELS).map(([frequency, label]) => <option key={frequency} value={frequency}>{label}</option>)}
+            </select></label>
+            <label>Policy renewal date (recommended)<input onChange={(event) => setDraft((current) => ({ ...current, renewalDate: event.target.value }))} type="date" value={draft.renewalDate} /></label>
+          </> : <label>Recurrence<select onChange={(event) => setDraft((current) => ({ ...current, recurrence: event.target.value as Recurrence }))} value={draft.recurrence}>
             <option value="none">One-off</option><option value="weekly">Weekly</option><option value="fortnightly">Fortnightly</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option>
-          </select></label>
+          </select></label>}
           <label className="entry-description-field">Notes (optional)<input maxLength={300} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} value={draft.notes} /></label>
           {error && <div className="form-error" role="alert">{error}</div>}
           {message && <div className="mortgage-success" role="status">{message}</div>}
@@ -1689,33 +1994,36 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
         </form>
       </section>
       <section className="panel finance-list-panel">
-        <div className="panel-heading"><div><h2>{kind === "bill" ? "Bills" : "Policies and renewals"}</h2><p>{kind === "bill" ? "Track upcoming bills and payments already made." : "Recurring due dates roll forward automatically."}</p></div></div>
+        <div className="panel-heading"><div><h2>{kind === "bill" ? "Bills" : "Policies and renewals"}</h2><p>{kind === "bill" ? "Track upcoming bills and payments already made." : "All active policies, ordered by renewal date."}</p></div></div>
         {kind === "bill" && (
         <div className="bill-status-controls">
           <div aria-label="Bill status" className="bill-status-tabs" role="tablist">
             <button aria-selected={billTab === "upcoming"} className={billTab === "upcoming" ? "selected" : ""} onClick={() => setBillTab("upcoming")} role="tab" type="button">Upcoming</button>
             <button aria-selected={billTab === "paid"} className={billTab === "paid" ? "selected" : ""} onClick={() => setBillTab("paid")} role="tab" type="button">Paid</button>
           </div>
-          <button className="account-delete-button bill-delete-all-button" disabled={loading || deletingAllBills || items.length === 0} onClick={() => void deleteAllBillsInTab()} type="button">
+          <button className="account-delete-button bill-delete-all-button" disabled={loading || deletingAllBills || selectedStatusItems.length === 0} onClick={() => void deleteAllBillsInTab()} type="button">
             {deletingAllBills ? "Deleting…" : "Delete all"}
           </button>
           </div>
         )}
-        {loading ? <p className="mortgage-status">Loading {title.toLowerCase()}…</p> : items.length === 0 ? <p className="dashboard-section-empty">No {title.toLowerCase()} added yet.</p> : (
+        {loading ? <p className="mortgage-status">Loading {title.toLowerCase()}…</p> : items.length === 0 ? <p className="dashboard-section-empty">{kind === "insurance" ? "No insurance policies added yet." : `No ${title.toLowerCase()} in ${periodRange.label}.`}</p> : (
           <div className="finance-entry-list">{items.map((item) => (
-            <article className="finance-entry-row" key={item.id}>
-              <div className="finance-entry-date">{formatDate(item.nextDueDate, { year: "numeric" })}</div>
+            <article className={`finance-entry-row${kind === "insurance" && getPolicyRenewalStatus(item.renewalDate) ? ` insurance-renewal-${getPolicyRenewalStatus(item.renewalDate)}` : ""}`} key={item.id}>
+              <div className="finance-entry-date">{formatDate(kind === "bill" && billTab === "paid" ? item.paidDate ?? item.dueDate : item.nextDueDate, { year: "numeric" })}</div>
                 <div className="finance-entry-details"><strong>{item.name}</strong>
                   {kind === "insurance" ? <>
-                    <span>{[policyTypeLabels[item.policyType], item.provider, item.policyType === "home" ? item.propertyName : ""].filter(Boolean).join(" · ")}</span>
-                    <span><b>You pay:</b> {formatMoney(item.amountCents)} {item.recurrence === "none" ? "once" : ({ weekly: "every week", fortnightly: "every fortnight", monthly: "every month", quarterly: "every 3 months", yearly: "every year", none: "once" }[item.recurrence])}</span>
-                    {item.insuredValueCents > 0 && <span><b>{item.policyType === "home" ? "Covered for:" : item.policyType === "life" ? "Pays out if you die:" : "Pays you each month:"}</b> {formatMoney(item.insuredValueCents)}</span>}
+                    <span>{getInsuranceTypeLabel(item.policyType)} · {item.provider}{item.policyNumber ? ` · Policy ${item.policyNumber}` : ""}</span>
+                    <span><b>Premium:</b> {formatMoney(item.amountCents)} · {INSURANCE_FREQUENCY_LABELS[(item.paymentFrequency || (item.recurrence === "none" ? "one-off" : item.recurrence)) as InsurancePaymentFrequency] ?? (item.paymentFrequency || item.recurrence)}</span>
+                    <span><b>Next payment:</b> {formatDate(item.nextDueDate, { year: "numeric" })}</span>
+                    <span><b>Policy renewal:</b> {item.renewalDate ? formatDate(item.renewalDate, { year: "numeric" }) : "Not set"}</span>
+                    {getPolicyRenewalStatus(item.renewalDate) && <span className="insurance-renewal-warning">{getPolicyRenewalStatus(item.renewalDate) === "overdue" ? "Renewal overdue" : "Renewal within 30 days"}</span>}
+                    {getPolicyDetails(item).map(({ label, value }) => <span key={label}><b>{label}:</b> {value}</span>)}
                     {item.notes && <span>Notes: {item.notes}</span>}
                   </> : <span>{[item.provider, item.recurrence === "none" ? "One-off" : ({ weekly: "Weekly", fortnightly: "Fortnightly", monthly: "Monthly", quarterly: "Quarterly", yearly: "Yearly", none: "One-off" }[item.recurrence])].filter(Boolean).join(" · ")}{item.notes ? ` · ${item.notes}` : ""}</span>}
                 </div>
               <strong className="finance-entry-amount">{formatMoney(item.amountCents)}{kind === "insurance" && <small className="entry-amount-label">premium</small>}</strong>
-              {kind === "bill" && item.status === "paid" && <span className="bill-paid-status">Paid</span>}
-              {kind === "bill" && item.status === "upcoming" && <button className="secondary-button bill-mark-paid-button" disabled={markingPaidId === item.id} onClick={() => void markPaid(item)} type="button">{markingPaidId === item.id ? "Saving…" : "Mark paid"}</button>}
+              {kind === "bill" && (item.status ?? "upcoming") === "paid" && <span className="bill-paid-status">Paid</span>}
+              {kind === "bill" && (item.status ?? "upcoming") === "upcoming" && <button className="secondary-button bill-mark-paid-button" disabled={markingPaidId === item.id} onClick={() => void markPaid(item)} type="button">{markingPaidId === item.id ? "Saving…" : "Mark paid"}</button>}
               <button className="account-delete-button" onClick={() => editItem(item)} type="button">Edit</button>
               <button className="account-delete-button" onClick={() => void removeItem(item)} type="button">Delete</button>
             </article>
@@ -1727,6 +2035,7 @@ function PlannerPage({ kind, onChanged }: { kind: PlannerKind; onChanged: () => 
 }
 
 interface BudgetDraft {
+  group: BudgetGroup;
   category: string;
   limit: string;
   frequency: BudgetFrequency;
@@ -1743,6 +2052,7 @@ interface BudgetSourceOption {
 function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
   const [budgets, setBudgets] = useState<BudgetPlan[]>([]);
   const [drafts, setDrafts] = useState<BudgetDraft[]>([]);
+  const [summary, setSummary] = useState<BudgetBuilderSummary | null>(null);
   const [sources, setSources] = useState<Record<BudgetSourceType, BudgetSourceOption[]>>({
     mortgage: [], loan: [], bill: [], insurance: [], other: [],
   });
@@ -1752,10 +2062,19 @@ function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    Promise.all([api.budgets(), api.mortgage(), api.loans(), api.plannerItems("bill"), api.plannerItems("insurance")])
-      .then(([loaded, mortgages, loans, bills, insurance]) => {
+    Promise.all([
+      api.budgets(),
+      api.budgetBuilderSummary(),
+      api.mortgage(),
+      api.loans(),
+      api.plannerItems("bill"),
+      api.plannerItems("insurance"),
+    ])
+      .then(([loaded, loadedSummary, mortgages, loans, bills, insurance]) => {
         setBudgets(loaded);
+        setSummary(loadedSummary);
         setDrafts(loaded.map((budget) => ({
+          group: budget.group,
           category: budget.category,
           limit: (budget.limitCents / 100).toFixed(2),
           frequency: budget.frequency,
@@ -1782,7 +2101,7 @@ function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
             name: bill.name,
             detail: `${formatMoney(bill.amountCents)} ${bill.recurrence === "none" ? "one-off" : bill.recurrence}`,
           })),
-          insurance: insurance.map((policy) => ({
+          insurance: insurance.filter((policy) => policy.status === "upcoming").map((policy) => ({
             id: policy.id,
             name: policy.name,
             detail: `${formatMoney(policy.amountCents)} premium ${policy.recurrence === "none" ? "one-off" : policy.recurrence}`,
@@ -1802,6 +2121,7 @@ function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
     try {
       const saved = await api.saveBudgets(drafts.map((budget) => ({
         category: budget.category,
+        group: budget.group,
         limitCents: Math.round(Number(budget.limit) * 100),
         frequency: budget.frequency,
         sourceType: budget.sourceType,
@@ -1809,12 +2129,14 @@ function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
       })));
       setBudgets(saved);
       setDrafts(saved.map((budget) => ({
+        group: budget.group,
         category: budget.category,
         limit: (budget.limitCents / 100).toFixed(2),
         frequency: budget.frequency,
         sourceType: budget.sourceType,
         sourceId: budget.sourceId === null ? "" : String(budget.sourceId),
       })));
+      setSummary(await api.budgetBuilderSummary());
       await onChanged();
       setMessage("Budgets saved.");
     } catch (reason) {
@@ -1829,17 +2151,32 @@ function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
     fortnightly: "Fortnightly",
     monthly: "Monthly",
   };
-  const cadenceTotals = (["weekly", "fortnightly", "monthly"] as BudgetFrequency[])
-    .map((frequency) => {
-      const matching = budgets.filter((budget) => budget.frequency === frequency);
-      if (matching.length === 0) return null;
+  const allocationDrafts = drafts.map((budget) => ({
+    limitCents: Math.max(0, Math.round(Number(budget.limit) * 100) || 0),
+    frequency: budget.frequency,
+    sourceType: budget.sourceType,
+  }));
+  const allocatedCents = calculateBudgetAllocations(allocationDrafts);
+  const totals = calculateBudgetSummary(
+    summary?.incomeCents ?? 0,
+    summary?.fixedCommitmentsCents ?? 0,
+    allocatedCents,
+  );
+  const luxuryAllocatedCents = drafts
+    .filter((budget) => budget.group === "Luxury")
+    .reduce((total, budget) => total + monthlyEquivalentCents(Math.max(0, Math.round(Number(budget.limit) * 100) || 0), budget.frequency), 0);
+  const savingsWarning = getSavingsGoalWarning(
+    drafts.map((budget) => {
+      const saved = budgets.find((item) => item.category.toLocaleLowerCase() === budget.category.trim().toLocaleLowerCase());
       return {
-        frequency,
-        used: matching.reduce((total, budget) => total + budget.spentCents + budget.committedCents, 0),
-        limit: matching.reduce((total, budget) => total + budget.limitCents, 0),
+        group: budget.group,
+        limitCents: Math.max(0, Math.round(Number(budget.limit) * 100) || 0),
+        spentCents: saved?.spentCents ?? 0,
+        frequency: budget.frequency,
       };
-    })
-    .filter((total): total is NonNullable<typeof total> => total !== null);
+    }),
+    luxuryAllocatedCents,
+  );
   const sourceTypeLabel: Record<BudgetSourceType, string> = {
     mortgage: "Mortgage",
     loan: "Loan",
@@ -1852,61 +2189,99 @@ function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
     setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...change } : item));
   }
 
+  const orderedBudgets = BUDGET_GROUPS.map((group) => ({
+    group,
+    items: budgets.filter((budget) => budget.group === group),
+  }));
+  const orderedDrafts = drafts
+    .map((budget, index) => ({ budget, index }))
+    .sort((left, right) => BUDGET_GROUPS.indexOf(left.budget.group) - BUDGET_GROUPS.indexOf(right.budget.group));
+  const percent = (spent: number, limit: number) => Math.round(spent / limit * 100);
+
   return (
     <div className="secondary-page">
-      <div className="welcome-row"><div><div className="eyebrow">HOUSEHOLD SPENDING PLAN</div><h1>Budgets</h1><p className="welcome-subtitle">Choose weekly, fortnightly or monthly targets for each cost.</p></div></div>
-      <div className="finance-summary-strip"><span>Budget totals by period</span>{cadenceTotals.map((total) => <strong key={total.frequency}>{cadenceLabel[total.frequency]} {formatMoney(total.used)} / {formatMoney(total.limit)}</strong>)}<span>{budgets.length} {budgets.length === 1 ? "category" : "categories"}</span></div>
+      <div className="welcome-row"><div><div className="eyebrow">HOUSEHOLD SPENDING PLAN</div><h1>Budget Builder</h1><p className="welcome-subtitle">Understand what is available, then allocate it across your priorities.</p></div></div>
+      <section className="budget-builder-summary" aria-label="Monthly budget summary">
+        {[
+          ["Income", summary?.incomeCents ?? 0, `Recorded in ${summary?.month ?? "this month"}`],
+          ["Fixed commitments", summary?.fixedCommitmentsCents ?? 0, "Monthly equivalent"],
+          ["Available to budget", totals.availableCents, "Income less fixed commitments"],
+          ["Budget allocated", allocatedCents, "Excludes linked fixed commitments"],
+          ["Remaining", totals.remainingCents, totals.overBudgetCents > 0 ? `Over budget by ${formatMoney(totals.overBudgetCents)}` : "Still available to allocate"],
+        ].map(([label, amount, detail]) => (
+          <div className="budget-summary-card" key={label as string}>
+            <span>{label}</span><strong className={label === "Remaining" && totals.overBudgetCents > 0 ? "budget-negative" : ""}>{formatMoney(amount as number)}</strong><small>{detail}</small>
+          </div>
+        ))}
+      </section>
+      {totals.overBudgetCents > 0 && <p className="budget-over-warning" role="status">Your plan is over the available amount by {formatMoney(totals.overBudgetCents)}. You can still save this budget.</p>}
+      {savingsWarning && (
+        <aside className="budget-guidance" role="status">
+          <strong>Savings goal not fully funded</strong>
+          <span>{formatMoney(savingsWarning.remainingTargetCents)} remains to reach your savings target while {formatMoney(savingsWarning.luxuryAllocatedCents)} is allocated to Luxury.</span>
+        </aside>
+      )}
       <section className="panel finance-list-panel">
-        <div className="panel-heading"><div><h2>Monthly budget progress</h2><p>Actual spending plus monthly costs from selected accounts and bills.</p></div></div>
+        <div className="panel-heading"><div><h2>Spending compared with budget</h2><p>Recorded spending is compared with each saved budget amount. Linked fixed commitments are shown separately.</p></div></div>
         {loading ? <p className="mortgage-status">Loading budgets…</p> : budgets.length === 0 ? <p className="dashboard-section-empty">No budgets yet. Add categories and monthly limits below.</p> : (
-          <div className="budget-list">{budgets.map((budget) => {
-            const totalUsed = budget.spentCents + budget.committedCents;
-            const percentage = Math.round((totalUsed / budget.limitCents) * 100);
-            return <div className="budget-row" key={budget.id}>
-              <div className="budget-topline"><strong>{budget.category} · {cadenceLabel[budget.frequency]}</strong><span>{formatMoney(totalUsed)} of {formatMoney(budget.limitCents)} · {percentage}%</span></div>
-              {budget.committedCents > 0 && <small className="budget-commitment">{formatMoney(budget.spentCents)} spent · {formatMoney(budget.committedCents)} planned from linked item</small>}
-              <div className="budget-track"><span className={percentage >= 95 ? "near-limit" : ""} style={{ width: `${Math.min(100, percentage)}%` }} /></div>
-            </div>;
-          })}</div>
+          <div className="budget-priority-list">{orderedBudgets.filter(({ items }) => items.length > 0).map(({ group, items }) => (
+            <section className={`budget-priority-group budget-group-${BUDGET_GROUPS.indexOf(group)}`} key={group}>
+              <h3>{group}</h3>
+              <div className="budget-list">{items.map((budget) => {
+                const totalUsed = budget.spentCents + budget.committedCents;
+                const percentage = percent(totalUsed, budget.limitCents);
+                const remaining = budget.limitCents - totalUsed;
+                return <div className="budget-row" key={budget.id}>
+                  <div className="budget-topline"><strong>{budget.category} · {cadenceLabel[budget.frequency]}</strong><span>{formatMoney(budget.spentCents)} actual · {percentage}% used</span></div>
+                  <div className="budget-comparison"><span>Budget <b>{formatMoney(budget.limitCents)}</b></span><span>Actual spending <b>{formatMoney(budget.spentCents)}</b></span><span>Remaining <b>{formatMoney(remaining)}</b></span></div>
+                  {budget.committedCents > 0 && <small className="budget-commitment">{formatMoney(budget.committedCents)} planned from linked fixed commitment</small>}
+                  <div className="budget-track"><span className={percentage >= 95 ? "near-limit" : ""} style={{ width: `${Math.min(100, Math.max(0, percentage))}%` }} /></div>
+                </div>;
+              })}</div>
+            </section>
+          ))}</div>
         )}
       </section>
       <section className="panel finance-entry-panel">
-        <div className="accounts-form-heading"><div><h2>Budget categories</h2><p>Select an existing cost, or choose Other to name a custom category.</p></div><button className="secondary-button add-split-button" onClick={() => setDrafts((current) => [...current, { category: "", limit: "", frequency: "monthly", sourceType: "other", sourceId: "" }])} type="button">+ Add category</button></div>
+        <div className="accounts-form-heading"><div><h2>Allocate your budget</h2><p>Set a target for each category. Link a fixed commitment where it applies.</p></div><button className="secondary-button add-split-button" onClick={() => setDrafts((current) => [...current, { group: "Essentials", category: "", limit: "", frequency: "monthly", sourceType: "other", sourceId: "" }])} type="button">+ Add category</button></div>
         {loading ? <p className="mortgage-status">Loading…</p> : (
           <form className="budget-edit-form" onSubmit={submit}>
-            {drafts.map((budget, index) => {
+            {orderedDrafts.map(({ budget, index }, draftIndex) => {
               const options = sources[budget.sourceType];
-              return <div className="budget-edit-row" key={index}>
-                <label>Include<select onChange={(event) => {
-                  const sourceType = event.target.value as BudgetSourceType;
-                  updateDraft(index, { sourceType, sourceId: "", category: "" });
-                }} value={budget.sourceType}>
-                  {Object.entries(sourceTypeLabel).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              const previous = orderedDrafts[draftIndex - 1];
+              return <Fragment key={index}>
+                {(!previous || previous.budget.group !== budget.group) && <h3 className="budget-edit-group-title">{budget.group}</h3>}
+                <div className={`budget-edit-row budget-group-${BUDGET_GROUPS.indexOf(budget.group)}`}>
+                <label>Priority group<select onChange={(event) => updateDraft(index, { group: event.target.value as BudgetGroup, category: "" })} value={budget.group}>
+                  {BUDGET_GROUPS.map((group) => <option key={group} value={group}>{group}</option>)}
                 </select></label>
-                {budget.sourceType === "other" ? (
-                  <label>Category<input maxLength={80} onChange={(event) => updateDraft(index, { category: event.target.value })} placeholder="e.g. Pet costs" required value={budget.category} /></label>
+                {budget.group === "Other" ? (
+                  <label>Custom category<input maxLength={80} onChange={(event) => updateDraft(index, { category: event.target.value })} placeholder="Enter a category name" required value={budget.category} /></label>
                 ) : (
-                  <label>{sourceTypeLabel[budget.sourceType]} item<select onChange={(event) => {
-                    const source = options.find((option) => String(option.id) === event.target.value);
-                    updateDraft(index, {
-                      sourceId: event.target.value,
-                      category: source ? `${sourceTypeLabel[budget.sourceType]}: ${source.name}` : "",
-                    });
-                  }} required value={budget.sourceId}>
-                    <option value="">Choose an item</option>
-                    {options.map((option) => <option key={option.id} value={option.id}>{option.name} · {option.detail}</option>)}
+                  <label>Category<select onChange={(event) => updateDraft(index, { category: event.target.value })} required value={budget.category}>
+                    <option value="">Choose a category</option>
+                    {BUDGET_CATEGORIES[budget.group].map((category) => <option key={category} value={category}>{category}</option>)}
                   </select></label>
                 )}
+                <label>Fixed commitment<select onChange={(event) => updateDraft(index, { sourceType: event.target.value as BudgetSourceType, sourceId: "" })} value={budget.sourceType}>
+                  {Object.entries(sourceTypeLabel).map(([value, label]) => <option key={value} value={value}>{value === "other" ? "None" : label}</option>)}
+                </select></label>
+                {budget.sourceType !== "other" && <label>{sourceTypeLabel[budget.sourceType]} item<select onChange={(event) => updateDraft(index, { sourceId: event.target.value })} required value={budget.sourceId}>
+                  <option value="">Choose an item</option>
+                  {options.map((option) => <option key={option.id} value={option.id}>{option.name} · {option.detail}</option>)}
+                </select></label>}
                 <label>Budget period<select onChange={(event) => updateDraft(index, { frequency: event.target.value as BudgetFrequency })} value={budget.frequency}>
                   <option value="weekly">Weekly</option><option value="fortnightly">Fortnightly</option><option value="monthly">Monthly</option>
                 </select></label>
                 <label>{cadenceLabel[budget.frequency]} limit (AUD)<span className="money-input"><span>$</span><input inputMode="decimal" min="0.01" onChange={(event) => updateDraft(index, { limit: event.target.value })} required step="0.01" type="number" value={budget.limit} /></span></label>
                 <button className="account-delete-button" onClick={() => setDrafts((current) => current.filter((_, itemIndex) => itemIndex !== index))} type="button">Remove</button>
-              </div>;
+                </div>
+              </Fragment>;
             })}
             {error && <div className="form-error" role="alert">{error}</div>}
             {message && <div className="mortgage-success" role="status">{message}</div>}
-            <div className="finance-form-actions"><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Save budgets"} <ArrowRight size={15} /></button></div>
+            <p className="budget-allocation-note">Linked fixed commitments are already included above and are not deducted again from your category allocations.</p>
+            <div className="finance-form-actions"><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Save budget plan"} <ArrowRight size={15} /></button></div>
           </form>
         )}
       </section>
@@ -1914,53 +2289,58 @@ function BudgetsPage({ onChanged }: { onChanged: () => Promise<void> }) {
   );
 }
 
-function ReportsPage() {
-  const [report, setReport] = useState<FinanceReport | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    api.report()
-      .then(setReport)
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to load reports."))
-      .finally(() => setLoading(false));
-  }, []);
-
+function ReportsPage({
+  periodRange,
+  report,
+  loading,
+  error,
+}: {
+  periodRange: PeriodRange;
+  report: FinanceReport | null;
+  loading: boolean;
+  error: string;
+}) {
   return (
     <div className="secondary-page">
-      <div className="welcome-row"><div><div className="eyebrow">YOUR FINANCIAL ACTIVITY</div><h1>Reports</h1><p className="welcome-subtitle">Monthly income and spending trends from your entries over the last 12 months.</p></div></div>
+      <div className="welcome-row"><div><div className="eyebrow">YOUR FINANCIAL ACTIVITY</div><h1>Reports</h1><p className="welcome-subtitle">Actual financial results for {periodRange.label}.</p></div></div>
       {error && <div className="form-error" role="alert">{error}</div>}
-      {loading ? <section className="panel finance-list-panel"><p className="mortgage-status">Loading reports…</p></section> : report && (
+      {loading ? <section className="panel finance-list-panel"><p className="mortgage-status">Loading reports…</p></section> : !report ? (
+        <section className="panel finance-list-panel"><p className="dashboard-section-empty">Period report data is unavailable.</p></section>
+      ) : (
         <>
-          <div className="finance-summary-strip"><span>This month income<strong>{formatMoney(report.incomeCents)}</strong></span><span>This month spending<strong>{formatMoney(report.spendingCents)}</strong></span><span>Net<strong>{formatMoney(report.incomeCents - report.spendingCents)}</strong></span></div>
-          {report.monthly.length === 0 ? (
-            <section className="panel report-empty-state"><h2>No report data yet</h2><p>Add income and spending entries to generate monthly charts and category summaries.</p></section>
-          ) : (
-            <>
-              <section className="panel report-chart-panel">
-                <div className="panel-heading"><div><h2>Monthly cash flow</h2><p>Income and spending for months with recorded entries.</p></div></div>
+          <div className="finance-summary-strip">
+            <span>Income<strong>{formatMoney(report.incomeCents)}</strong></span>
+            <span>Spending<strong>{formatMoney(report.spendingCents)}</strong></span>
+            <span>Bills paid<strong>{formatMoney(report.billsPaidCents)}</strong></span>
+            <span>Total outgoings<strong>{formatMoney(report.totalOutgoingsCents)}</strong></span>
+            <span>Net cash flow<strong>{formatMoney(report.netCashFlowCents)}</strong></span>
+            {isPeriodCurrentOrFuture(periodRange) && <span>Upcoming Bills<strong>{formatMoney(report.upcomingBillsCents)}</strong></span>}
+          </div>
+          <section className="panel report-chart-panel">
+            <div className="panel-heading"><div><h2>Cash flow</h2><p>Income, Spending and Bills paid by actual date in {periodRange.label}.</p></div></div>
+            {report.hasActivity ? (
                 <div className="chart-wrap">
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={report.monthly} margin={{ top: 12, right: 5, bottom: 0, left: -12 }}>
-                      <defs><linearGradient id="reportIncome" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#5d87e8" stopOpacity={0.2} /><stop offset="100%" stopColor="#5d87e8" stopOpacity={0} /></linearGradient><linearGradient id="reportSpending" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#c4b5fd" stopOpacity={0.25} /><stop offset="100%" stopColor="#c4b5fd" stopOpacity={0} /></linearGradient></defs>
+                    <AreaChart data={report.series} margin={{ top: 12, right: 5, bottom: 0, left: -12 }}>
+                      <defs><linearGradient id="reportIncome" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#5d87e8" stopOpacity={0.2} /><stop offset="100%" stopColor="#5d87e8" stopOpacity={0} /></linearGradient><linearGradient id="reportSpending" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#c4b5fd" stopOpacity={0.25} /><stop offset="100%" stopColor="#c4b5fd" stopOpacity={0} /></linearGradient><linearGradient id="reportBills" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f1b85a" stopOpacity={0.2} /><stop offset="100%" stopColor="#f1b85a" stopOpacity={0} /></linearGradient></defs>
                       <CartesianGrid stroke="#edf0f4" vertical={false} />
-                      <XAxis dataKey="month" tickFormatter={formatMonth} axisLine={false} tickLine={false} />
+                      <XAxis dataKey="bucket" tickFormatter={(bucket: string) => formatPeriodBucket(bucket, periodRange.unit)} axisLine={false} tickLine={false} />
                       <YAxis tickFormatter={(value: number) => `$${(value / 100000).toFixed(1)}k`} axisLine={false} tickLine={false} />
-                      <Tooltip content={<ChartTooltip />} />
+                      <Tooltip content={<ChartTooltip periodUnit={periodRange.unit} />} />
                       <Area type="monotone" dataKey="incomeCents" name="Income" stroke="#5d87e8" strokeWidth={2.5} fill="url(#reportIncome)" />
                       <Area type="monotone" dataKey="spendingCents" name="Spending" stroke="#a78bfa" strokeWidth={2.5} fill="url(#reportSpending)" />
+                      <Area type="monotone" dataKey="billsPaidCents" name="Bills paid" stroke="#e1a843" strokeWidth={2.5} fill="url(#reportBills)" />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
-              </section>
-              <section className="panel finance-list-panel">
-                <div className="panel-heading"><div><h2>Spending by category</h2><p>This month.</p></div></div>
-                {report.categories.length === 0 ? <p className="dashboard-section-empty">No spending entries recorded this month.</p> : report.categories.map((category) => (
-                  <div className="budget-topline report-category-row" key={category.category}><strong>{category.category}</strong><span>{formatMoney(category.spendingCents)}</span></div>
-                ))}
-              </section>
-            </>
-          )}
+            ) : <div className="dashboard-section-empty">No income, spending or paid bills in this period.</div>}
+          </section>
+          <section className="panel finance-list-panel">
+            <div className="panel-heading"><div><h2>Outgoings by category</h2><p>Spending entries plus Bills paid in {periodRange.label}.</p></div></div>
+            {report.categories.length === 0 ? <p className="dashboard-section-empty">No outgoings recorded in this period.</p> : report.categories.map((category) => (
+              <div className="budget-topline report-category-row" key={category.category}><strong>{category.category}</strong><span>{formatMoney(category.spendingCents)}</span></div>
+            ))}
+          </section>
         </>
       )}
     </div>

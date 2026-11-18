@@ -216,9 +216,10 @@ test("paid bills contribute to historical spending but not upcoming totals", () 
   }]);
 
   const report = getFinanceReport(db, new Date("2026-10-15T12:00:00"));
-  const october = report.monthly.find((item) => item.month === "2026-10");
-  assert.equal(october?.spendingCents, 15000);
-  assert.equal(report.spendingCents, 15000);
+  const october = report.series.find((item) => item.bucket === "2026-10-03");
+  assert.equal(october?.billsPaidCents, 15000);
+  assert.equal(report.spendingCents, 0);
+  assert.equal(report.billsPaidCents, 15000);
   const dashboard = getDashboardData(db, new Date("2026-10-15T12:00:00"));
   assert.equal(dashboard.monthlySpendingCents, 15000);
   assert.equal(dashboard.spendingHistory.find((item) => item.month === "2026-10")?.spendingCents, 15000);

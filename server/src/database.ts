@@ -120,7 +120,8 @@ export function createDatabase(
       limit_cents INTEGER NOT NULL CHECK (limit_cents > 0),
       frequency TEXT NOT NULL DEFAULT 'monthly' CHECK (frequency IN ('weekly', 'fortnightly', 'monthly')),
       source_type TEXT NOT NULL DEFAULT 'other' CHECK (source_type IN ('mortgage', 'loan', 'bill', 'insurance', 'other')),
-      source_id INTEGER
+      source_id INTEGER,
+      group_name TEXT NOT NULL DEFAULT 'Other' CHECK (group_name IN ('Essentials', 'Savings & Goals', 'Lifestyle', 'Luxury', 'Other'))
     );
 
     CREATE TABLE IF NOT EXISTS planner_item (
@@ -130,13 +131,30 @@ export function createDatabase(
       paid_date TEXT,
       name TEXT NOT NULL,
       provider TEXT NOT NULL DEFAULT '',
-      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
       due_date TEXT NOT NULL,
       recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly')),
       notes TEXT NOT NULL DEFAULT '',
       property_name TEXT NOT NULL DEFAULT 'Home',
       insured_value_cents INTEGER NOT NULL DEFAULT 0,
-      policy_type TEXT NOT NULL DEFAULT 'home'
+      policy_type TEXT NOT NULL DEFAULT 'home',
+      policy_number TEXT NOT NULL DEFAULT '',
+      payment_frequency TEXT NOT NULL DEFAULT '',
+      renewal_date TEXT NOT NULL DEFAULT '',
+      contents_cover_cents INTEGER NOT NULL DEFAULT 0,
+      vehicle TEXT NOT NULL DEFAULT '',
+      cover_basis TEXT NOT NULL DEFAULT '',
+      policy_level TEXT NOT NULL DEFAULT '',
+      covered_people TEXT NOT NULL DEFAULT '',
+      pet_name TEXT NOT NULL DEFAULT '',
+      cover_level TEXT NOT NULL DEFAULT '',
+      trip_destination TEXT NOT NULL DEFAULT '',
+      coverage_start_date TEXT NOT NULL DEFAULT '',
+      coverage_end_date TEXT NOT NULL DEFAULT '',
+      insured_person TEXT NOT NULL DEFAULT '',
+      waiting_period TEXT NOT NULL DEFAULT '',
+      benefit_period TEXT NOT NULL DEFAULT '',
+      other_description TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS app_setting (
@@ -247,6 +265,100 @@ function ensurePlannerColumns(db: Database.Database): void {
   if (!columns.has("paid_date")) {
     db.exec("ALTER TABLE planner_item ADD COLUMN paid_date TEXT");
   }
+  const textColumns = [
+    "policy_number",
+    "payment_frequency",
+    "renewal_date",
+    "vehicle",
+    "cover_basis",
+    "policy_level",
+    "covered_people",
+    "pet_name",
+    "cover_level",
+    "trip_destination",
+    "coverage_start_date",
+    "coverage_end_date",
+    "insured_person",
+    "waiting_period",
+    "benefit_period",
+    "other_description",
+  ];
+  for (const column of textColumns) {
+    if (!columns.has(column)) {
+      db.exec(`ALTER TABLE planner_item ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
+    }
+  }
+  if (!columns.has("contents_cover_cents")) {
+    db.exec("ALTER TABLE planner_item ADD COLUMN contents_cover_cents INTEGER NOT NULL DEFAULT 0");
+  }
+  db.exec(
+    `UPDATE planner_item
+     SET payment_frequency = CASE recurrence WHEN 'none' THEN 'one-off' ELSE recurrence END
+     WHERE kind = 'insurance' AND payment_frequency = ''`,
+  );
+  ensurePlannerAllowsZeroPremium(db);
+}
+
+function ensurePlannerAllowsZeroPremium(db: Database.Database): void {
+  const schema = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'planner_item'",
+  ).get() as { sql: string } | undefined;
+  if (!schema?.sql || !/amount_cents\s+INTEGER\s+NOT\s+NULL\s+CHECK\s*\(\s*amount_cents\s*>\s*0\s*\)/i.test(schema.sql)) {
+    return;
+  }
+  const migrate = db.transaction(() => {
+    db.exec(`
+      ALTER TABLE planner_item RENAME TO planner_item_before_zero_premium;
+      CREATE TABLE planner_item (
+        id INTEGER PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('bill', 'insurance')),
+        status TEXT NOT NULL DEFAULT 'upcoming' CHECK (status IN ('upcoming', 'paid')),
+        paid_date TEXT,
+        name TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT '',
+        amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+        due_date TEXT NOT NULL,
+        recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly')),
+        notes TEXT NOT NULL DEFAULT '',
+        property_name TEXT NOT NULL DEFAULT 'Home',
+        insured_value_cents INTEGER NOT NULL DEFAULT 0,
+        policy_type TEXT NOT NULL DEFAULT 'home',
+        policy_number TEXT NOT NULL DEFAULT '',
+        payment_frequency TEXT NOT NULL DEFAULT '',
+        renewal_date TEXT NOT NULL DEFAULT '',
+        contents_cover_cents INTEGER NOT NULL DEFAULT 0,
+        vehicle TEXT NOT NULL DEFAULT '',
+        cover_basis TEXT NOT NULL DEFAULT '',
+        policy_level TEXT NOT NULL DEFAULT '',
+        covered_people TEXT NOT NULL DEFAULT '',
+        pet_name TEXT NOT NULL DEFAULT '',
+        cover_level TEXT NOT NULL DEFAULT '',
+        trip_destination TEXT NOT NULL DEFAULT '',
+        coverage_start_date TEXT NOT NULL DEFAULT '',
+        coverage_end_date TEXT NOT NULL DEFAULT '',
+        insured_person TEXT NOT NULL DEFAULT '',
+        waiting_period TEXT NOT NULL DEFAULT '',
+        benefit_period TEXT NOT NULL DEFAULT '',
+        other_description TEXT NOT NULL DEFAULT ''
+      );
+      INSERT INTO planner_item (
+        id, kind, status, paid_date, name, provider, amount_cents, due_date, recurrence, notes,
+        property_name, insured_value_cents, policy_type, policy_number, payment_frequency, renewal_date,
+        contents_cover_cents, vehicle, cover_basis, policy_level, covered_people, pet_name, cover_level,
+        trip_destination, coverage_start_date, coverage_end_date, insured_person, waiting_period, benefit_period,
+        other_description
+      )
+      SELECT
+        id, kind, status, paid_date, name, provider, amount_cents, due_date, recurrence, notes,
+        property_name, insured_value_cents, policy_type, policy_number, payment_frequency, renewal_date,
+        contents_cover_cents, vehicle, cover_basis, policy_level, covered_people, pet_name, cover_level,
+        trip_destination, coverage_start_date, coverage_end_date, insured_person, waiting_period, benefit_period,
+        other_description
+      FROM planner_item_before_zero_premium;
+      DROP TABLE planner_item_before_zero_premium;
+    `);
+  });
+  migrate();
 }
 
 function ensureBudgetColumns(db: Database.Database): void {
@@ -263,6 +375,9 @@ function ensureBudgetColumns(db: Database.Database): void {
   }
   if (!columns.has("source_id")) {
     db.exec("ALTER TABLE budget_plan ADD COLUMN source_id INTEGER");
+  }
+  if (!columns.has("group_name")) {
+    db.exec("ALTER TABLE budget_plan ADD COLUMN group_name TEXT NOT NULL DEFAULT 'Other'");
   }
 }
 

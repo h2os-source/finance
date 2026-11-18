@@ -19,6 +19,7 @@ import {
   deletePlannerItem,
   deletePlannerItemsByStatus,
   getFinanceReport,
+  getBudgetBuilderSummary,
   importStatementBatch,
   listBudgets,
   listEntries,
@@ -39,6 +40,11 @@ import {
   type StatementBillInput,
   type StatementImportFailure,
 } from "./finance";
+import {
+  getCurrentPeriodSelection,
+  getPeriodRange,
+  type PeriodSelection,
+} from "./timePeriods";
 
 const currentDirectory = __dirname;
 const dataDirectory = process.env.FINANCE_DATA_DIR
@@ -379,6 +385,10 @@ app.get("/api/budgets", requireAuth, (_req, res) => {
   res.json(listBudgets(db, new Date()));
 });
 
+app.get("/api/budgets/summary", requireAuth, (_req, res) => {
+  res.json(getBudgetBuilderSummary(db));
+});
+
 app.put("/api/budgets", requireAuth, (req, res, next) => {
   const body = req.body as { budgets?: unknown };
   if (!Array.isArray(body.budgets)) {
@@ -484,8 +494,28 @@ app.delete("/api/planner/:id", requireAuth, (req, res) => {
   res.status(204).end();
 });
 
-app.get("/api/reports", requireAuth, (_req, res) => {
-  res.json(getFinanceReport(db));
+app.get("/api/reports", requireAuth, (req, res) => {
+  const periodValue = req.query.period;
+  const dateValue = req.query.date;
+  let selection: PeriodSelection;
+  if (periodValue === undefined && dateValue === undefined) {
+    selection = getCurrentPeriodSelection();
+  } else if (
+    (periodValue === "week" || periodValue === "month" || periodValue === "financialYear") &&
+    typeof dateValue === "string"
+  ) {
+    selection = { unit: periodValue, date: dateValue };
+  } else {
+    res.status(400).json({ error: "Choose a valid reporting period and date." });
+    return;
+  }
+  try {
+    getPeriodRange(selection);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Choose a valid reporting date." });
+    return;
+  }
+  res.json(getFinanceReport(db, selection));
 });
 
 app.get("/api/accounts", requireAuth, (_req, res) => {
@@ -738,6 +768,7 @@ function parseBudget(value: unknown): BudgetInput {
   if (
     typeof budget.category !== "string" ||
     typeof budget.limitCents !== "number" ||
+    (budget.group !== undefined && typeof budget.group !== "string") ||
     (budget.frequency !== undefined && typeof budget.frequency !== "string") ||
     (budget.sourceType !== undefined && typeof budget.sourceType !== "string") ||
     (budget.sourceId !== undefined && budget.sourceId !== null && typeof budget.sourceId !== "number")
@@ -746,6 +777,7 @@ function parseBudget(value: unknown): BudgetInput {
   }
   return {
     category: budget.category,
+    group: budget.group as BudgetInput["group"],
     limitCents: budget.limitCents,
     frequency: budget.frequency as BudgetInput["frequency"],
     sourceType: budget.sourceType as BudgetInput["sourceType"],
@@ -785,8 +817,15 @@ function parsePlannerItem(value: unknown): PlannerItemInput {
     typeof item.dueDate !== "string" ||
     typeof item.recurrence !== "string" ||
     typeof item.notes !== "string" ||
-    (item.propertyName !== undefined && typeof item.propertyName !== "string") ||
-    (item.insuredValueCents !== undefined && typeof item.insuredValueCents !== "number") ||
+    [
+      "propertyName", "policyNumber", "renewalDate", "vehicle", "coverBasis", "policyLevel", "coveredPeople",
+      "petName", "coverLevel", "tripDestination", "coverageStartDate", "coverageEndDate", "insuredPerson",
+      "waitingPeriod", "benefitPeriod", "otherDescription",
+    ].some((field) => item[field] !== undefined && typeof item[field] !== "string") ||
+    [
+      "insuredValueCents", "contentsCoverCents",
+    ].some((field) => item[field] !== undefined && typeof item[field] !== "number") ||
+    (item.paymentFrequency !== undefined && typeof item.paymentFrequency !== "string") ||
     (item.policyType !== undefined && typeof item.policyType !== "string")
   ) {
     throw new Error("Enter valid item details.");
@@ -802,6 +841,23 @@ function parsePlannerItem(value: unknown): PlannerItemInput {
     propertyName: item.propertyName as string | undefined,
     insuredValueCents: item.insuredValueCents as number | undefined,
     policyType: item.policyType as PlannerItemInput["policyType"],
+    policyNumber: item.policyNumber as string | undefined,
+    paymentFrequency: item.paymentFrequency as PlannerItemInput["paymentFrequency"],
+    renewalDate: item.renewalDate as string | undefined,
+    contentsCoverCents: item.contentsCoverCents as number | undefined,
+    vehicle: item.vehicle as string | undefined,
+    coverBasis: item.coverBasis as string | undefined,
+    policyLevel: item.policyLevel as string | undefined,
+    coveredPeople: item.coveredPeople as string | undefined,
+    petName: item.petName as string | undefined,
+    coverLevel: item.coverLevel as string | undefined,
+    tripDestination: item.tripDestination as string | undefined,
+    coverageStartDate: item.coverageStartDate as string | undefined,
+    coverageEndDate: item.coverageEndDate as string | undefined,
+    insuredPerson: item.insuredPerson as string | undefined,
+    waitingPeriod: item.waitingPeriod as string | undefined,
+    benefitPeriod: item.benefitPeriod as string | undefined,
+    otherDescription: item.otherDescription as string | undefined,
   };
 }
 

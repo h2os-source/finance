@@ -1,4 +1,22 @@
 import type Database from "better-sqlite3";
+import {
+  INSURANCE_TYPE_FIELDS,
+  normalizeInsuranceType,
+  nextInsurancePaymentDate,
+  validateTravelCoverageDates,
+  type InsuranceDetailField,
+  type InsurancePaymentFrequency,
+  type InsurancePolicyType,
+} from "./insurance";
+import {
+  getPeriodRange,
+  isDateInPeriod,
+  isPeriodCurrentOrFuture,
+  localDateString,
+  type PeriodSelection,
+  type PeriodUnit,
+} from "./timePeriods";
+import { isBudgetGroup, monthlyEquivalentCents, type BudgetGroup } from "./budget";
 
 export type EntryKind = "income" | "spending";
 export type PlannerKind = "bill" | "insurance";
@@ -38,6 +56,7 @@ export type RecurringIncomeInput = Omit<RecurringIncome, "id">;
 export interface BudgetPlan {
   id: number;
   category: string;
+  group: BudgetGroup;
   limitCents: number;
   spentCents: number;
   frequency: BudgetFrequency;
@@ -51,10 +70,17 @@ export type BudgetFrequency = "weekly" | "fortnightly" | "monthly";
 
 export interface BudgetInput {
   category: string;
+  group?: BudgetGroup;
   limitCents: number;
   frequency?: BudgetFrequency;
   sourceType?: BudgetSourceType;
   sourceId?: number | null;
+}
+
+export interface BudgetBuilderSummary {
+  incomeCents: number;
+  fixedCommitmentsCents: number;
+  month: string;
 }
 
 export interface PlannerItem {
@@ -71,15 +97,55 @@ export interface PlannerItem {
   propertyName: string;
   insuredValueCents: number;
   policyType: PolicyType;
+  policyNumber: string;
+  paymentFrequency: InsurancePaymentFrequency | "";
+  renewalDate: string;
+  contentsCoverCents: number;
+  vehicle: string;
+  coverBasis: string;
+  policyLevel: string;
+  coveredPeople: string;
+  petName: string;
+  coverLevel: string;
+  tripDestination: string;
+  coverageStartDate: string;
+  coverageEndDate: string;
+  insuredPerson: string;
+  waitingPeriod: string;
+  benefitPeriod: string;
+  otherDescription: string;
   nextDueDate: string;
 }
 
-export type PolicyType = "home" | "income" | "life";
+export type PolicyType = InsurancePolicyType;
 
-export type PlannerItemInput = Omit<PlannerItem, "id" | "nextDueDate" | "status" | "paidDate" | "propertyName" | "insuredValueCents" | "policyType"> & {
+export type PlannerItemInput = Omit<
+  PlannerItem,
+  "id" | "nextDueDate" | "status" | "paidDate" | "propertyName" | "insuredValueCents" | "policyType" |
+  "policyNumber" | "paymentFrequency" | "renewalDate" | "contentsCoverCents" | "vehicle" | "coverBasis" |
+  "policyLevel" | "coveredPeople" | "petName" | "coverLevel" | "tripDestination" | "coverageStartDate" |
+  "coverageEndDate" | "insuredPerson" | "waitingPeriod" | "benefitPeriod" | "otherDescription"
+> & {
   policyType?: PolicyType;
   propertyName?: string;
   insuredValueCents?: number;
+  policyNumber?: string;
+  paymentFrequency?: InsurancePaymentFrequency;
+  renewalDate?: string;
+  contentsCoverCents?: number;
+  vehicle?: string;
+  coverBasis?: string;
+  policyLevel?: string;
+  coveredPeople?: string;
+  petName?: string;
+  coverLevel?: string;
+  tripDestination?: string;
+  coverageStartDate?: string;
+  coverageEndDate?: string;
+  insuredPerson?: string;
+  waitingPeriod?: string;
+  benefitPeriod?: string;
+  otherDescription?: string;
 };
 
 export interface StatementBillInput {
@@ -105,10 +171,19 @@ export interface StatementImportResult {
 }
 
 export interface FinanceReport {
-  monthly: Array<{ month: string; incomeCents: number; spendingCents: number }>;
+  period: PeriodUnit;
+  startDate: string;
+  endDate: string;
+  hasActivity: boolean;
+  series: Array<{ bucket: string; incomeCents: number; spendingCents: number; billsPaidCents: number }>;
   categories: Array<{ category: string; spendingCents: number }>;
   incomeCents: number;
   spendingCents: number;
+  billsPaidCents: number;
+  totalOutgoingsCents: number;
+  netCashFlowCents: number;
+  upcomingBillsCents: number;
+  upcomingItems: Array<{ id: number; title: string; dueDate: string; amountCents: number; kind: "bill" | "renewal" }>;
 }
 
 export function listRecurringIncome(db: Database.Database, now = new Date()): RecurringIncome[] {
@@ -311,7 +386,7 @@ export function listBudgets(db: Database.Database, period: string | Date = new D
     ? new Date(`${period.slice(0, 7)}-01T12:00:00.000Z`)
     : period;
   const budgets = db.prepare(
-    `SELECT b.id, b.category, b.limit_cents AS limitCents, b.frequency,
+    `SELECT b.id, b.category, b.group_name AS "group", b.limit_cents AS limitCents, b.frequency,
             b.source_type AS sourceType, b.source_id AS sourceId
      FROM budget_plan b
      ORDER BY b.category COLLATE NOCASE`,
@@ -339,6 +414,8 @@ export function saveBudgets(db: Database.Database, budgets: BudgetInput[]): Budg
     if (typeof budget.category !== "string" || !budget.category.trim() || budget.category.trim().length > 80) {
       throw new Error("Enter a budget category of up to 80 characters.");
     }
+    const group = budget.group ?? "Other";
+    if (!isBudgetGroup(group)) throw new Error("Choose a valid budget group.");
     const key = budget.category.trim().toLocaleLowerCase();
     if (seen.has(key)) throw new Error("Budget categories must be unique.");
     seen.add(key);
@@ -371,12 +448,71 @@ export function saveBudgets(db: Database.Database, budgets: BudgetInput[]): Budg
   }
   const save = db.transaction(() => {
     db.prepare("DELETE FROM budget_plan").run();
-    const insert = db.prepare("INSERT INTO budget_plan (category, limit_cents, frequency, source_type, source_id) VALUES (?, ?, ?, ?, ?)");
-    budgets.forEach(({ category, limitCents, frequency = "monthly", sourceType = "other", sourceId = null }) =>
-      insert.run(category.trim(), limitCents, frequency, sourceType, sourceId));
+    const insert = db.prepare("INSERT INTO budget_plan (category, group_name, limit_cents, frequency, source_type, source_id) VALUES (?, ?, ?, ?, ?, ?)");
+    budgets.forEach(({ category, group = "Other", limitCents, frequency = "monthly", sourceType = "other", sourceId = null }) =>
+      insert.run(category.trim(), group, limitCents, frequency, sourceType, sourceId));
   });
   save();
   return listBudgets(db, new Date());
+}
+
+export function getBudgetBuilderSummary(db: Database.Database, now = new Date()): BudgetBuilderSummary {
+  const start = localDateString(new Date(now.getFullYear(), now.getMonth(), 1));
+  const end = localDateString(new Date(now.getFullYear(), now.getMonth() + 1, 1));
+  const incomeCents = (db.prepare(
+    `SELECT COALESCE(SUM(amount_cents), 0) AS total FROM finance_entry
+     WHERE kind = 'income' AND entry_date >= ? AND entry_date < ?`,
+  ).get(start, end) as { total: number }).total;
+
+  const mortgageCents = (db.prepare(
+    `SELECT repayment_cents AS amountCents, repayment_frequency AS frequency
+     FROM mortgage WHERE is_mock = 0 AND repayment_cents > 0`,
+  ).all() as Array<{ amountCents: number; frequency: BudgetFrequency }>)
+    .reduce((total, item) => total + monthlyEquivalentCents(item.amountCents, item.frequency), 0);
+  const loanCents = (db.prepare(
+    `SELECT repayment_cents AS amountCents, repayment_frequency AS frequency
+     FROM personal_loan WHERE repayment_cents > 0`,
+  ).all() as Array<{ amountCents: number; frequency: BudgetFrequency }>)
+    .reduce((total, item) => total + monthlyEquivalentCents(item.amountCents, item.frequency), 0);
+
+  const bills = db.prepare(
+    `SELECT amount_cents AS amountCents, due_date AS dueDate, recurrence
+     FROM planner_item WHERE kind = 'bill' AND status = 'upcoming'`,
+  ).all() as Array<{ amountCents: number; dueDate: string; recurrence: Recurrence }>;
+  const billCents = bills.reduce((total, bill) => {
+    if (bill.recurrence === "none") {
+      return total + (bill.dueDate >= start && bill.dueDate < end ? bill.amountCents : 0);
+    }
+    return total + monthlyRecurringAmount(bill.amountCents, bill.recurrence);
+  }, 0);
+
+  const insurance = db.prepare(
+    `SELECT amount_cents AS amountCents, recurrence, payment_frequency AS paymentFrequency
+     FROM planner_item WHERE kind = 'insurance' AND status = 'upcoming'`,
+  ).all() as Array<{ amountCents: number; recurrence: Recurrence; paymentFrequency: string }>;
+  const insuranceCents = insurance.reduce((total, policy) => {
+    const frequency = policy.paymentFrequency || (policy.recurrence === "none" ? "one-off" : policy.recurrence);
+    return total + (frequency === "one-off" ? 0 : monthlyRecurringAmount(policy.amountCents, frequency));
+  }, 0);
+
+  return {
+    incomeCents,
+    fixedCommitmentsCents: mortgageCents + loanCents + billCents + insuranceCents,
+    month: start.slice(0, 7),
+  };
+}
+
+function monthlyRecurringAmount(amountCents: number, frequency: string): number {
+  const periodsPerYear: Record<string, number> = {
+    weekly: 52,
+    fortnightly: 26,
+    monthly: 12,
+    quarterly: 4,
+    "half-yearly": 2,
+    yearly: 1,
+  };
+  const periods = periodsPerYear[frequency];
+  return periods ? Math.round(amountCents * periods / 12) : 0;
 }
 
 function getBudgetSourcePeriodCost(
@@ -399,20 +535,32 @@ function getBudgetSourcePeriodCost(
   }
 
   const row = db.prepare(
-    `SELECT amount_cents AS amountCents, due_date AS dueDate, recurrence, status
+    `SELECT amount_cents AS amountCents, due_date AS dueDate, recurrence, status, payment_frequency AS paymentFrequency
      FROM planner_item WHERE id = ? AND kind = ?`,
-  ).get(sourceId, sourceType) as { amountCents: number; dueDate: string; recurrence: Recurrence; status: PlannerStatus } | undefined;
+  ).get(sourceId, sourceType) as {
+    amountCents: number;
+    dueDate: string;
+    recurrence: Recurrence;
+    status: PlannerStatus;
+    paymentFrequency: InsurancePaymentFrequency | "";
+  } | undefined;
   if (!row) return 0;
   if (sourceType === "bill" && row.status !== "upcoming") return 0;
-  if (row.recurrence === "none") return row.dueDate >= start && row.dueDate < end ? row.amountCents : 0;
-  const periodsPerYear: Record<Exclude<Recurrence, "none">, number> = {
+  const recurrence = sourceType === "insurance"
+    ? row.paymentFrequency || (row.recurrence === "none" ? "one-off" : row.recurrence)
+    : row.recurrence;
+  if (recurrence === "none" || recurrence === "one-off") {
+    return row.dueDate >= start && row.dueDate < end ? row.amountCents : 0;
+  }
+  const periodsPerYear: Record<Exclude<InsurancePaymentFrequency, "one-off">, number> = {
     weekly: 52,
     fortnightly: 26,
     monthly: 12,
     quarterly: 4,
+    "half-yearly": 2,
     yearly: 1,
   };
-  return Math.round(row.amountCents * periodsPerYear[row.recurrence] / budgetPeriodsPerYear(frequency));
+  return Math.round(row.amountCents * periodsPerYear[recurrence] / budgetPeriodsPerYear(frequency));
 }
 
 function convertRecurringCost(amountCents: number, sourceFrequency: BudgetFrequency, budgetFrequency: BudgetFrequency): number {
@@ -450,12 +598,27 @@ export function listPlannerItems(
 ): PlannerItem[] {
   return (db.prepare(
         `SELECT id, kind, status, paid_date AS paidDate, name, provider, amount_cents AS amountCents, due_date AS dueDate,
-          recurrence, notes, property_name AS propertyName, insured_value_cents AS insuredValueCents, policy_type AS policyType
+          recurrence, notes, property_name AS propertyName, insured_value_cents AS insuredValueCents, policy_type AS policyType,
+          policy_number AS policyNumber, payment_frequency AS paymentFrequency, renewal_date AS renewalDate,
+          contents_cover_cents AS contentsCoverCents, vehicle, cover_basis AS coverBasis, policy_level AS policyLevel,
+          covered_people AS coveredPeople, pet_name AS petName, cover_level AS coverLevel,
+          trip_destination AS tripDestination, coverage_start_date AS coverageStartDate,
+          coverage_end_date AS coverageEndDate, insured_person AS insuredPerson, waiting_period AS waitingPeriod,
+          benefit_period AS benefitPeriod, other_description AS otherDescription
      FROM planner_item WHERE kind = ? ORDER BY due_date, name COLLATE NOCASE`,
-  ).all(kind) as Omit<PlannerItem, "nextDueDate">[]).map((item) => ({
-    ...item,
-    nextDueDate: item.status === "paid" ? item.paidDate ?? item.dueDate : nextDueDate(item.dueDate, item.recurrence, now),
-  }));
+  ).all(kind) as Omit<PlannerItem, "nextDueDate">[]).map((item) => {
+    const nextDate = item.kind === "insurance"
+    ? nextInsurancePaymentDate(
+      item.dueDate,
+      item.paymentFrequency || (item.recurrence === "none" ? "one-off" : item.recurrence),
+      now,
+    )
+      : nextDueDate(item.dueDate, item.recurrence, now);
+    return {
+      ...item,
+      nextDueDate: item.status === "paid" ? item.paidDate ?? item.dueDate : nextDate,
+    };
+  });
 }
 
 export function createPlannerItem(
@@ -467,18 +630,47 @@ export function createPlannerItem(
   validatePlannerItem(input);
   validatePlannerStatus(input.kind, status, paidDate);
   const result = db.prepare(
-    `INSERT INTO planner_item (kind, status, paid_date, name, provider, amount_cents, due_date, recurrence, notes, property_name, insured_value_cents, policy_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(input.kind, status, paidDate, input.name.trim(), input.provider.trim(), input.amountCents, input.dueDate, input.recurrence, input.notes.trim(), input.propertyName?.trim() || "Home", input.insuredValueCents ?? 0, input.policyType ?? "home");
+    `INSERT INTO planner_item (
+       kind, status, paid_date, name, provider, amount_cents, due_date, recurrence, notes, property_name,
+       insured_value_cents, policy_type, policy_number, payment_frequency, renewal_date, contents_cover_cents,
+       vehicle, cover_basis, policy_level, covered_people, pet_name, cover_level, trip_destination,
+       coverage_start_date, coverage_end_date, insured_person, waiting_period, benefit_period, other_description
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.kind, status, paidDate, input.name.trim(), input.provider.trim(), input.amountCents, input.dueDate,
+    input.recurrence, input.notes.trim(), input.propertyName?.trim() || "Home", input.insuredValueCents ?? 0,
+    input.policyType ?? "home", input.policyNumber?.trim() ?? "",
+    input.paymentFrequency ?? (input.recurrence === "none" ? "one-off" : input.recurrence),
+    input.renewalDate ?? "", input.contentsCoverCents ?? 0, input.vehicle?.trim() ?? "",
+    input.coverBasis?.trim() ?? "", input.policyLevel?.trim() ?? "", input.coveredPeople?.trim() ?? "",
+    input.petName?.trim() ?? "", input.coverLevel?.trim() ?? "", input.tripDestination?.trim() ?? "",
+    input.coverageStartDate ?? "", input.coverageEndDate ?? "", input.insuredPerson?.trim() ?? "",
+    input.waitingPeriod?.trim() ?? "", input.benefitPeriod?.trim() ?? "", input.otherDescription?.trim() ?? "",
+  );
   return getPlannerItem(db, Number(result.lastInsertRowid));
 }
 
 export function updatePlannerItem(db: Database.Database, id: number, input: PlannerItemInput): PlannerItem | null {
   validatePlannerItem(input);
   const result = db.prepare(
-    `UPDATE planner_item SET kind = ?, name = ?, provider = ?, amount_cents = ?, due_date = ?, recurrence = ?, notes = ?,     property_name = ?, insured_value_cents = ?, policy_type = ?
+    `UPDATE planner_item SET kind = ?, name = ?, provider = ?, amount_cents = ?, due_date = ?, recurrence = ?, notes = ?,
+      property_name = ?, insured_value_cents = ?, policy_type = ?, policy_number = ?, payment_frequency = ?,
+      renewal_date = ?, contents_cover_cents = ?, vehicle = ?, cover_basis = ?, policy_level = ?, covered_people = ?,
+      pet_name = ?, cover_level = ?, trip_destination = ?, coverage_start_date = ?, coverage_end_date = ?,
+      insured_person = ?, waiting_period = ?, benefit_period = ?, other_description = ?
      WHERE id = ?`,
-      ).run(input.kind, input.name.trim(), input.provider.trim(), input.amountCents, input.dueDate, input.recurrence, input.notes.trim(), input.propertyName?.trim() || "Home", input.insuredValueCents ?? 0, input.policyType ?? "home", id);
+  ).run(
+    input.kind, input.name.trim(), input.provider.trim(), input.amountCents, input.dueDate, input.recurrence,
+    input.notes.trim(), input.propertyName?.trim() || "Home", input.insuredValueCents ?? 0, input.policyType ?? "home",
+    input.policyNumber?.trim() ?? "",
+    input.paymentFrequency ?? (input.recurrence === "none" ? "one-off" : input.recurrence),
+    input.renewalDate ?? "",
+    input.contentsCoverCents ?? 0, input.vehicle?.trim() ?? "", input.coverBasis?.trim() ?? "",
+    input.policyLevel?.trim() ?? "", input.coveredPeople?.trim() ?? "", input.petName?.trim() ?? "",
+    input.coverLevel?.trim() ?? "", input.tripDestination?.trim() ?? "", input.coverageStartDate ?? "",
+    input.coverageEndDate ?? "", input.insuredPerson?.trim() ?? "", input.waitingPeriod?.trim() ?? "",
+    input.benefitPeriod?.trim() ?? "", input.otherDescription?.trim() ?? "", id,
+  );
   if (!result.changes) return null;
   return getPlannerItem(db, id);
 }
@@ -565,7 +757,13 @@ export function markPlannerItemPaid(
   const item = db.prepare(
     `SELECT id, kind, status, paid_date AS paidDate, name, provider, amount_cents AS amountCents,
             due_date AS dueDate, recurrence, notes, property_name AS propertyName,
-            insured_value_cents AS insuredValueCents, policy_type AS policyType
+            insured_value_cents AS insuredValueCents, policy_type AS policyType,
+            policy_number AS policyNumber, payment_frequency AS paymentFrequency, renewal_date AS renewalDate,
+            contents_cover_cents AS contentsCoverCents, vehicle, cover_basis AS coverBasis, policy_level AS policyLevel,
+            covered_people AS coveredPeople, pet_name AS petName, cover_level AS coverLevel,
+            trip_destination AS tripDestination, coverage_start_date AS coverageStartDate,
+            coverage_end_date AS coverageEndDate, insured_person AS insuredPerson, waiting_period AS waitingPeriod,
+            benefit_period AS benefitPeriod, other_description AS otherDescription
      FROM planner_item WHERE id = ?`,
   ).get(id) as Omit<PlannerItem, "nextDueDate"> | undefined;
   if (!item || item.kind !== "bill" || item.status !== "upcoming") return null;
@@ -596,13 +794,26 @@ export function markPlannerItemPaid(
 function getPlannerItem(db: Database.Database, id: number, now = new Date()): PlannerItem {
   const item = db.prepare(
     `SELECT id, kind, status, paid_date AS paidDate, name, provider, amount_cents AS amountCents, due_date AS dueDate,
-            recurrence, notes, property_name AS propertyName, insured_value_cents AS insuredValueCents, policy_type AS policyType
+            recurrence, notes, property_name AS propertyName, insured_value_cents AS insuredValueCents, policy_type AS policyType,
+            policy_number AS policyNumber, payment_frequency AS paymentFrequency, renewal_date AS renewalDate,
+            contents_cover_cents AS contentsCoverCents, vehicle, cover_basis AS coverBasis, policy_level AS policyLevel,
+            covered_people AS coveredPeople, pet_name AS petName, cover_level AS coverLevel,
+            trip_destination AS tripDestination, coverage_start_date AS coverageStartDate,
+            coverage_end_date AS coverageEndDate, insured_person AS insuredPerson, waiting_period AS waitingPeriod,
+            benefit_period AS benefitPeriod, other_description AS otherDescription
      FROM planner_item WHERE id = ?`,
   ).get(id) as Omit<PlannerItem, "nextDueDate"> | undefined;
   if (!item) throw new Error("That bill could not be loaded after saving.");
+  const nextDate = item.kind === "insurance"
+    ? nextInsurancePaymentDate(
+      item.dueDate,
+      item.paymentFrequency || (item.recurrence === "none" ? "one-off" : item.recurrence),
+      now,
+    )
+    : nextDueDate(item.dueDate, item.recurrence, now);
   return {
     ...item,
-    nextDueDate: item.status === "paid" ? item.paidDate ?? item.dueDate : nextDueDate(item.dueDate, item.recurrence, now),
+    nextDueDate: item.status === "paid" ? item.paidDate ?? item.dueDate : nextDate,
   };
 }
 
@@ -614,7 +825,14 @@ function validatePlannerItem(input: PlannerItemInput): void {
   if (typeof input.provider !== "string" || input.provider.length > 100) {
     throw new Error("Provider must be 100 characters or fewer.");
   }
-  validateAmount(input.amountCents, "amount");
+  if (input.kind === "insurance") {
+    if (!Number.isSafeInteger(input.amountCents) || input.amountCents < 0 || input.amountCents > 100_000_000_000) {
+      throw new Error("Enter a premium of $0 to $1 billion.");
+    }
+    if (!input.provider.trim()) throw new Error("Enter an insurer.");
+  } else {
+    validateAmount(input.amountCents, "amount");
+  }
   validateDate(input.dueDate, "due");
   if (!["none", "weekly", "fortnightly", "monthly", "quarterly", "yearly"].includes(input.recurrence)) {
     throw new Error("Choose a valid recurrence.");
@@ -624,20 +842,59 @@ function validatePlannerItem(input: PlannerItemInput): void {
   }
   if (input.kind === "insurance") {
     const policyType = input.policyType ?? "home";
-    if (!["home", "income", "life"].includes(policyType)) throw new Error("Choose a valid insurance type.");
+    if (!["home", "auto", "car", "health", "pet", "travel", "life", "income", "incomeProtection", "other"].includes(policyType)) {
+      throw new Error("Choose a valid insurance type.");
+    }
+    const frequency = input.paymentFrequency ?? (input.recurrence === "none" ? "one-off" : input.recurrence);
+    if (!["weekly", "fortnightly", "monthly", "quarterly", "half-yearly", "yearly", "one-off"].includes(frequency)) {
+      throw new Error("Choose a valid insurance payment frequency.");
+    }
+    if (input.policyNumber !== undefined && (typeof input.policyNumber !== "string" || input.policyNumber.length > 100)) {
+      throw new Error("Policy number must be 100 characters or fewer.");
+    }
+    const activeType = normalizeInsuranceType(policyType);
+    const detailFields = INSURANCE_TYPE_FIELDS[activeType];
+    const optionalTextFields: Partial<Record<InsuranceDetailField, [string, string | undefined, number]>> = {
+      vehicle: ["vehicle", input.vehicle, 100],
+      coverBasis: ["cover basis", input.coverBasis, 30],
+      policyLevel: ["policy or cover level", input.policyLevel, 100],
+      coveredPeople: ["covered people", input.coveredPeople, 200],
+      petName: ["pet name", input.petName, 100],
+      coverLevel: ["cover level", input.coverLevel, 100],
+      tripDestination: ["trip or destination", input.tripDestination, 150],
+      insuredPerson: ["insured person", input.insuredPerson, 100],
+      waitingPeriod: ["waiting period", input.waitingPeriod, 80],
+      benefitPeriod: ["benefit period", input.benefitPeriod, 80],
+      description: ["description", input.otherDescription, 300],
+    };
+    for (const [field, details] of Object.entries(optionalTextFields) as Array<[InsuranceDetailField, [string, string | undefined, number]]>) {
+      const [label, value, maxLength] = details;
+      if (detailFields.includes(field) && value !== undefined && (typeof value !== "string" || value.length > maxLength)) {
+        throw new Error(`${label} must be ${maxLength} characters or fewer.`);
+      }
+    }
+    if (input.renewalDate) validateDate(input.renewalDate, "renewal");
+    if (activeType === "travel") {
+      validateTravelCoverageDates(input.coverageStartDate ?? "", input.coverageEndDate ?? "");
+    }
+    if (detailFields.includes("coverBasis") && input.coverBasis && !["agreed", "market", "agreed value", "market value"].includes(input.coverBasis.trim().toLowerCase())) {
+      throw new Error("Choose an agreed or market value cover basis.");
+    }
     const propertyName = input.propertyName ?? "Home";
     const insuredValueCents = input.insuredValueCents ?? 0;
-    if (policyType !== "home") {
-      if (!Number.isSafeInteger(insuredValueCents) || insuredValueCents < 0 || insuredValueCents > 100_000_000_000) {
-        throw new Error("Enter a cover amount of $0 to $1 billion.");
+    const coverAmounts: Array<[string, number]> = [];
+    if (detailFields.includes("insuredValue") || detailFields.includes("buildingCover") || detailFields.includes("monthlyBenefit")) {
+      coverAmounts.push(["insured value", insuredValueCents]);
+    }
+    if (detailFields.includes("contentsCover")) coverAmounts.push(["contents cover", input.contentsCoverCents ?? 0]);
+    for (const [label, amount] of coverAmounts) {
+      if (!Number.isSafeInteger(amount) || amount < 0 || amount > 100_000_000_000) {
+        throw new Error(`Enter ${label} of $0 to $1 billion.`);
       }
-      return;
     }
-    if (typeof propertyName !== "string" || !propertyName.trim() || propertyName.trim().length > 80) {
-      throw new Error("Enter a property name of up to 80 characters.");
-    }
-    if (!Number.isSafeInteger(insuredValueCents) || insuredValueCents <= 0 || insuredValueCents > 100_000_000_000) {
-      throw new Error("Enter an insured amount greater than $0 and up to $1 billion.");
+    if (detailFields.includes("propertyName")) {
+      if (typeof propertyName !== "string" || propertyName.length > 80) throw new Error("Property or home must be 80 characters or fewer.");
+      if (!propertyName.trim()) throw new Error("Enter a property or home.");
     }
   }
 }
@@ -674,72 +931,121 @@ function nextDueDate(dueDate: string, recurrence: Recurrence, now: Date): string
   return `${due.getFullYear()}-${String(due.getMonth() + 1).padStart(2, "0")}-${String(due.getDate()).padStart(2, "0")}`;
 }
 
-export function getFinanceReport(db: Database.Database, now = new Date()): FinanceReport {
-  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const paidBillSpending = paidBillSpendingByMonth(db, shiftDateMonths(`${month}-01`, -11), shiftDateMonths(`${month}-01`, 1));
-  const actualMonthly = db.prepare(
-    `SELECT substr(entry_date, 1, 7) AS month,
-            SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END) AS incomeCents,
-            SUM(CASE WHEN kind = 'spending' THEN amount_cents ELSE 0 END) AS spendingCents
-     FROM finance_entry WHERE entry_date >= date(?, '-11 months', 'start of month')
-     GROUP BY substr(entry_date, 1, 7) ORDER BY month`,
-  ).all(`${month}-01`) as FinanceReport["monthly"];
-  const reportMonths = Array.from({ length: 12 }, (_, index) => {
-    const date = new Date(`${month}-01T00:00:00`);
-    date.setMonth(date.getMonth() - (11 - index));
-    return asDateString(date).slice(0, 7);
-  });
-  const scheduledIncome = recurringIncomeByMonth(db, reportMonths);
-  const monthlyByMonth = new Map(actualMonthly.map((item) => [item.month, item]));
-  const monthly = reportMonths
-    .filter((reportMonth) => monthlyByMonth.has(reportMonth) || paidBillSpending.has(reportMonth) || (scheduledIncome.get(reportMonth) ?? 0) > 0)
-    .map((reportMonth) => {
-      const actual = monthlyByMonth.get(reportMonth);
-      return {
-        month: reportMonth,
-        incomeCents: (actual?.incomeCents ?? 0) + (scheduledIncome.get(reportMonth) ?? 0),
-        spendingCents: (actual?.spendingCents ?? 0) + (paidBillSpending.get(reportMonth) ?? 0),
-      };
-    });
-  const totals = db.prepare(
-    `SELECT SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END) AS incomeCents,
-            SUM(CASE WHEN kind = 'spending' THEN amount_cents ELSE 0 END) AS spendingCents
-     FROM finance_entry WHERE substr(entry_date, 1, 7) = ?`,
-  ).get(month) as { incomeCents: number | null; spendingCents: number | null };
-  const categories = db.prepare(
-    `SELECT category, SUM(amount_cents) AS spendingCents FROM finance_entry
-     WHERE kind = 'spending' AND substr(entry_date, 1, 7) = ?
-     GROUP BY category ORDER BY spendingCents DESC`,
-  ).all(month) as FinanceReport["categories"];
-  const currentPaidBills = paidBillSpending.get(month) ?? 0;
-  if (currentPaidBills > 0) {
-    const billsCategory = categories.find((item) => item.category === "Bills");
-    if (billsCategory) billsCategory.spendingCents += currentPaidBills;
-    else categories.push({ category: "Bills", spendingCents: currentPaidBills });
-    categories.sort((left, right) => right.spendingCents - left.spendingCents);
-  }
-  return {
-    monthly,
-    categories,
-    incomeCents: (totals.incomeCents ?? 0) + (scheduledIncome.get(month) ?? 0),
-    spendingCents: (totals.spendingCents ?? 0) + currentPaidBills,
-  };
-}
-
-function paidBillSpendingByMonth(db: Database.Database, start: string, end: string): Map<string, number> {
-  const rows = db.prepare(
-    `SELECT substr(paid_date, 1, 7) AS month, SUM(amount_cents) AS spendingCents
+export function getFinanceReport(
+  db: Database.Database,
+  selectionOrNow: PeriodSelection | Date = { unit: "month", date: localDateString(new Date()) },
+  reportingNow = new Date(),
+): FinanceReport {
+  const selection = selectionOrNow instanceof Date
+    ? { unit: "month" as const, date: localDateString(selectionOrNow) }
+    : selectionOrNow;
+  const now = selectionOrNow instanceof Date ? selectionOrNow : reportingNow;
+  const range = getPeriodRange(selection);
+  const endDate = new Date(`${range.endDateExclusive}T12:00:00`);
+  endDate.setDate(endDate.getDate() - 1);
+  const today = localDateString(now);
+  const actualEntries = db.prepare(
+    `SELECT kind, amount_cents AS amountCents, category, entry_date AS entryDate
+     FROM finance_entry WHERE entry_date >= ? AND entry_date < ?`,
+  ).all(range.startDate, range.endDateExclusive) as Array<{
+    kind: EntryKind;
+    amountCents: number;
+    category: string;
+    entryDate: string;
+  }>;
+  const paidBills = db.prepare(
+    `SELECT amount_cents AS amountCents, paid_date AS paidDate
      FROM planner_item
-     WHERE kind = 'bill' AND status = 'paid' AND paid_date >= ? AND paid_date < ?
-     GROUP BY substr(paid_date, 1, 7)`,
-  ).all(start, end) as Array<{ month: string; spendingCents: number }>;
-  return new Map(rows.map((row) => [row.month, row.spendingCents]));
-}
+     WHERE kind = 'bill' AND status = 'paid' AND paid_date >= ? AND paid_date < ?`,
+  ).all(range.startDate, range.endDateExclusive) as Array<{ amountCents: number; paidDate: string }>;
 
-function shiftDateMonths(date: string, months: number): string {
-  const result = new Date(`${date}T00:00:00`);
-  result.setMonth(result.getMonth() + months);
-  return asDateString(result);
+  const incomeCents = actualEntries
+    .filter((entry) => entry.kind === "income")
+    .reduce((total, entry) => total + entry.amountCents, 0);
+  const spendingEntries = actualEntries.filter((entry) => entry.kind === "spending");
+  const spendingCents = spendingEntries.reduce((total, entry) => total + entry.amountCents, 0);
+  const billsPaidCents = paidBills.reduce((total, bill) => total + bill.amountCents, 0);
+  const totalOutgoingsCents = spendingCents + billsPaidCents;
+  const buckets = new Map<string, { incomeCents: number; spendingCents: number; billsPaidCents: number }>();
+  const bucketForDate = (date: string) => range.unit === "financialYear" ? date.slice(0, 7) : date;
+  const cursor = new Date(`${range.startDate}T12:00:00`);
+  while (localDateString(cursor) < range.endDateExclusive) {
+    const date = localDateString(cursor);
+    const bucket = bucketForDate(date);
+    if (!buckets.has(bucket)) buckets.set(bucket, { incomeCents: 0, spendingCents: 0, billsPaidCents: 0 });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  for (const entry of actualEntries) {
+    const bucket = buckets.get(bucketForDate(entry.entryDate));
+    if (!bucket) continue;
+    if (entry.kind === "income") bucket.incomeCents += entry.amountCents;
+    else bucket.spendingCents += entry.amountCents;
+  }
+  for (const bill of paidBills) {
+    const bucket = buckets.get(bucketForDate(bill.paidDate));
+    if (bucket) bucket.billsPaidCents += bill.amountCents;
+  }
+
+  const categoryTotals = new Map<string, number>();
+  for (const entry of spendingEntries) {
+    categoryTotals.set(entry.category, (categoryTotals.get(entry.category) ?? 0) + entry.amountCents);
+  }
+  if (billsPaidCents > 0) {
+    categoryTotals.set("Bills", (categoryTotals.get("Bills") ?? 0) + billsPaidCents);
+  }
+  const categories = [...categoryTotals]
+    .map(([category, amount]) => ({ category, spendingCents: amount }))
+    .sort((left, right) => right.spendingCents - left.spendingCents);
+
+  const upcomingItems: FinanceReport["upcomingItems"] = [];
+  if (isPeriodCurrentOrFuture(range, today)) {
+    const bills = listPlannerItems(db, "bill", now);
+    const insurance = listPlannerItems(db, "insurance", now);
+    for (const item of [...bills, ...insurance]) {
+      if (item.status !== "upcoming" || !isDateInPeriod(item.nextDueDate, range)) continue;
+      upcomingItems.push({
+        id: -item.id,
+        title: item.name,
+        dueDate: item.nextDueDate,
+        amountCents: item.amountCents,
+        kind: item.kind === "bill" ? "bill" : "renewal",
+      });
+    }
+    const otherItems = db.prepare(
+      `SELECT id, title, due_date AS dueDate, amount_cents AS amountCents, kind
+       FROM upcoming_item WHERE due_date >= ? AND due_date < ?`,
+    ).all(range.startDate, range.endDateExclusive) as Array<{
+      id: number;
+      title: string;
+      dueDate: string;
+      amountCents: number;
+      kind: string;
+    }>;
+    upcomingItems.push(...otherItems.map((item) => ({
+      ...item,
+      kind: item.kind === "bill" ? "bill" as const : "renewal" as const,
+    })));
+    upcomingItems.sort((left, right) => left.dueDate.localeCompare(right.dueDate));
+  }
+  const upcomingBillsCents = upcomingItems
+    .filter((item) => item.kind === "bill")
+    .reduce((total, item) => total + item.amountCents, 0);
+
+  return {
+    period: range.unit,
+    startDate: range.startDate,
+    endDate: localDateString(endDate),
+    hasActivity: incomeCents > 0 || totalOutgoingsCents > 0,
+    series: [...buckets].map(([bucket, values]) => ({ bucket, ...values })),
+    categories,
+    incomeCents,
+    spendingCents,
+    billsPaidCents,
+    totalOutgoingsCents,
+    netCashFlowCents: incomeCents - totalOutgoingsCents,
+    upcomingBillsCents,
+    upcomingItems,
+  };
 }
 
 export function getDashboardEntryHistory(db: Database.Database, now = new Date()): Array<{

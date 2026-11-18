@@ -1,5 +1,6 @@
 import type {
   AuthStatus,
+  BudgetBuilderSummary,
   BudgetPlan,
   DashboardData,
   FinanceEntry,
@@ -17,6 +18,7 @@ import type {
   RecurringIncomeInput,
   StatementTransaction,
 } from "./types";
+import type { PeriodSelection } from "../server/src/timePeriods";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -112,6 +114,7 @@ export const api = {
     request<RecurringIncome>(`/api/recurring-income/${id}`, { method: "PUT", body: JSON.stringify(item) }),
   deleteRecurringIncome: (id: number) => request<void>(`/api/recurring-income/${id}`, { method: "DELETE" }),
   budgets: () => request<BudgetPlan[]>("/api/budgets"),
+  budgetBuilderSummary: () => request<BudgetBuilderSummary>("/api/budgets/summary"),
   saveBudgets: (budgets: Array<Omit<BudgetPlan, "id" | "spentCents" | "committedCents">>) =>
     request<BudgetPlan[]>("/api/budgets", { method: "PUT", body: JSON.stringify({ budgets }) }),
   plannerItems: (kind: PlannerKind) => request<PlannerItem[]>(`/api/planner?kind=${kind}`),
@@ -127,5 +130,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ status }),
     }),
-  report: () => request<FinanceReport>("/api/reports"),
+  report: (period: PeriodSelection) =>
+    request<FinanceReport>(`/api/reports?period=${encodeURIComponent(period.unit)}&date=${encodeURIComponent(period.date)}`),
 };

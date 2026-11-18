@@ -1,3 +1,9 @@
+import type {
+  InsurancePaymentFrequency,
+  InsurancePolicyType,
+} from "../server/src/insurance";
+import type { BudgetGroup } from "../server/src/budget";
+
 export interface AuthStatus {
   setupRequired: boolean;
   authenticated: boolean;
@@ -10,7 +16,6 @@ export interface DashboardData {
   mortgageIsMock: boolean;
   accountsAreMock: boolean;
   updatedAt: string;
-  financialYear: string;
   netPositionCents: number;
   cashCents: number;
   offsetCents: number;
@@ -123,6 +128,7 @@ export interface RecurringIncomeInput extends Omit<RecurringIncome, "id"> {}
 export interface BudgetPlan {
   id: number;
   category: string;
+  group: BudgetGroup;
   limitCents: number;
   spentCents: number;
   frequency: BudgetFrequency;
@@ -133,6 +139,12 @@ export interface BudgetPlan {
 
 export type BudgetSourceType = "mortgage" | "loan" | "bill" | "insurance" | "other";
 export type BudgetFrequency = "weekly" | "fortnightly" | "monthly";
+
+export interface BudgetBuilderSummary {
+  incomeCents: number;
+  fixedCommitmentsCents: number;
+  month: string;
+}
 
 export interface PlannerItem {
   id: number;
@@ -148,18 +160,71 @@ export interface PlannerItem {
   propertyName: string;
   insuredValueCents: number;
   policyType: PolicyType;
+  policyNumber: string;
+  paymentFrequency: InsurancePaymentFrequency | "";
+  renewalDate: string;
+  contentsCoverCents: number;
+  vehicle: string;
+  coverBasis: string;
+  policyLevel: string;
+  coveredPeople: string;
+  petName: string;
+  coverLevel: string;
+  tripDestination: string;
+  coverageStartDate: string;
+  coverageEndDate: string;
+  insuredPerson: string;
+  waitingPeriod: string;
+  benefitPeriod: string;
+  otherDescription: string;
   nextDueDate: string;
 }
 
 export type PlannerStatus = "upcoming" | "paid";
 
-export type PolicyType = "home" | "income" | "life";
+export type PolicyType = InsurancePolicyType;
 
-export interface PlannerItemInput extends Omit<PlannerItem, "id" | "nextDueDate" | "status" | "paidDate"> {}
+export type PlannerItemInput = Omit<
+  PlannerItem,
+  "id" | "nextDueDate" | "status" | "paidDate" | "propertyName" | "insuredValueCents" | "policyType" |
+  "policyNumber" | "paymentFrequency" | "renewalDate" | "contentsCoverCents" | "vehicle" | "coverBasis" |
+  "policyLevel" | "coveredPeople" | "petName" | "coverLevel" | "tripDestination" | "coverageStartDate" |
+  "coverageEndDate" | "insuredPerson" | "waitingPeriod" | "benefitPeriod" | "otherDescription"
+> & {
+  propertyName?: string;
+  insuredValueCents?: number;
+  policyType?: PolicyType;
+  policyNumber?: string;
+  paymentFrequency?: InsurancePaymentFrequency;
+  renewalDate?: string;
+  contentsCoverCents?: number;
+  vehicle?: string;
+  coverBasis?: string;
+  policyLevel?: string;
+  coveredPeople?: string;
+  petName?: string;
+  coverLevel?: string;
+  tripDestination?: string;
+  coverageStartDate?: string;
+  coverageEndDate?: string;
+  insuredPerson?: string;
+  waitingPeriod?: string;
+  benefitPeriod?: string;
+  otherDescription?: string;
+};
 
 export interface FinanceReport {
-  monthly: Array<{ month: string; incomeCents: number; spendingCents: number }>;
+  period: "week" | "month" | "financialYear";
+  startDate: string;
+  endDate: string;
+  hasActivity: boolean;
+  series: Array<{ bucket: string; incomeCents: number; spendingCents: number; billsPaidCents: number }>;
   categories: Array<{ category: string; spendingCents: number }>;
   incomeCents: number;
   spendingCents: number;
+  billsPaidCents: number;
+  totalOutgoingsCents: number;
+  netCashFlowCents: number;
+  upcomingBillsCents: number;
+  upcomingItems: Array<{ id: number; title: string; dueDate: string; amountCents: number; kind: "bill" | "renewal" }>;
 }

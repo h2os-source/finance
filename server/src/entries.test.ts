@@ -53,7 +53,9 @@ test("delete all Spending removes only spending entries and refreshes spending t
     notes: "Statement payment",
   }]);
 
-  assert.equal(getFinanceReport(db, now).spendingCents, 11300);
+  assert.equal(getFinanceReport(db, now).spendingCents, 10000);
+  assert.equal(getFinanceReport(db, now).billsPaidCents, 1300);
+  assert.equal(getFinanceReport(db, now).totalOutgoingsCents, 11300);
   assert.equal(getDashboardData(db, now).monthlySpendingCents, 11300);
 
   assert.equal(deleteAllSpendingEntries(db), 2);
@@ -63,7 +65,8 @@ test("delete all Spending removes only spending entries and refreshes spending t
   const bills = listPlannerItems(db, "bill", now);
   assert.equal(bills.length, 2);
   assert.deepEqual(new Set(bills.map((bill) => bill.status)), new Set(["upcoming", "paid"]));
-  assert.equal(getFinanceReport(db, now).spendingCents, 1300);
+  assert.equal(getFinanceReport(db, now).spendingCents, 0);
+  assert.equal(getFinanceReport(db, now).billsPaidCents, 1300);
   assert.equal(getDashboardData(db, now).monthlySpendingCents, 1300);
   db.close();
 });
